@@ -389,6 +389,7 @@ pub fn load_profile(
     label: Option<String>,
     id: Option<String>,
     force: bool,
+    with_status: bool,
     json: bool,
 ) -> Result<(), String> {
     let use_color_err = use_color_stderr();
@@ -464,15 +465,25 @@ pub fn load_profile(
         label.clone(),
     );
     store.save(paths)?;
+    drop(store);
+
+    let mut profile_json = serde_json::json!({
+        "id": selected_id,
+        "label": label,
+    });
+    if json && with_status {
+        match current_status_json_value(paths) {
+            Ok(status) => {
+                profile_json["status"] = status;
+            }
+            Err(err) => {
+                profile_json["status_error"] = serde_json::Value::String(normalize_error(&err));
+            }
+        }
+    }
 
     if json {
-        let result = CommandResultJson::success(
-            "load",
-            serde_json::json!({
-                "id": selected_id,
-                "label": label,
-            }),
-        );
+        let result = CommandResultJson::success("load", profile_json);
         result.print()?;
         return Ok(());
     }
@@ -482,6 +493,13 @@ pub fn load_profile(
         use_color_out,
     );
     print_output_block(&message);
+    if with_status && let Err(err) = loaded_profile_status(paths) {
+        let message = format!(
+            "Loaded profile, but status retrieval failed: {}",
+            normalize_error(&err)
+        );
+        eprintln!("{}", format_warning(&message, use_color_err));
+    }
     Ok(())
 }
 
@@ -634,6 +652,25 @@ pub fn status_profiles(
         return status_selected_profile(paths, label.as_deref(), id.as_deref(), json);
     }
 
+    status_current_profile(paths, json)
+}
+
+fn status_current_profile(paths: &Paths, json: bool) -> Result<(), String> {
+    let (current_entry, ctx) = current_status_entry(paths, json)?;
+    if json {
+        return print_current_status_json(current_entry);
+    }
+    if let Some(entry) = current_entry {
+        let lines = render_entries(std::slice::from_ref(&entry), &ctx, false);
+        print_output_block(&lines.join("\n"));
+    } else {
+        let message = format_no_profiles(paths, ctx.use_color);
+        print_output_block(&message);
+    }
+    Ok(())
+}
+
+fn current_status_entry(paths: &Paths, json: bool) -> Result<(Option<Entry>, ListCtx), String> {
     let snapshot = load_snapshot(paths, false)?;
     let current_saved_id = current_saved_id(paths, &snapshot.tokens);
     let mut ctx = ListCtx::new(paths, true, false, false);
@@ -642,17 +679,28 @@ pub fn status_profiles(
     }
     let labels = &snapshot.labels;
     let tokens_map = &snapshot.tokens;
-    let current_entry = make_current(paths, current_saved_id.as_deref(), labels, tokens_map, &ctx);
-    if json {
-        return print_current_status_json(current_entry);
-    }
-    if let Some(entry) = current_entry {
-        let lines = render_entries(&[entry], &ctx, false);
-        print_output_block(&lines.join("\n"));
-    } else {
+    let current = make_current(paths, current_saved_id.as_deref(), labels, tokens_map, &ctx);
+    Ok((current, ctx))
+}
+
+fn current_status_json_value(paths: &Paths) -> Result<serde_json::Value, String> {
+    let (current, _) = current_status_entry(paths, true)?;
+    let payload = current.map(status_profile_json);
+    serde_json::to_value(payload).map_err(|err| crate::msg1(PROFILE_ERR_SERIALIZE_INDEX, err))
+}
+
+fn loaded_profile_status(paths: &Paths) -> Result<(), String> {
+    let (current_entry, ctx) = current_status_entry(paths, false)?;
+    let Some(entry) = current_entry else {
         let message = format_no_profiles(paths, ctx.use_color);
         print_output_block(&message);
+        return Ok(());
+    };
+    if let Some(err) = entry.error_summary.as_deref() {
+        return Err(err.to_string());
     }
+    let lines = render_entry_details(&entry);
+    print_output_block(&lines.join("\n"));
     Ok(())
 }
 
@@ -2001,24 +2049,7 @@ fn render_entries(entries: &[Entry], ctx: &ListCtx, allow_plain_spacing: bool) -
         } else {
             entry_lines.push(header);
             entry_lines.push(String::new());
-            entry_lines.extend(entry.details.iter().flat_map(|line| {
-                if line.is_empty() {
-                    vec![String::new()]
-                } else {
-                    line.lines()
-                        .enumerate()
-                        .map(|(index, part)| {
-                            if part.is_empty() {
-                                String::new()
-                            } else if index == 0 {
-                                format!(" {part}")
-                            } else {
-                                part.to_string()
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                }
-            }));
+            entry_lines.extend(render_entry_details(entry));
         }
         lines.extend(entry_lines);
         if idx + 1 < entries.len() {
@@ -2029,6 +2060,26 @@ fn render_entries(entries: &[Entry], ctx: &ListCtx, allow_plain_spacing: bool) -
         }
     }
     lines
+}
+
+fn render_entry_details(entry: &Entry) -> Vec<String> {
+    let mut details = Vec::new();
+    for line in &entry.details {
+        if line.is_empty() {
+            details.push(String::new());
+            continue;
+        }
+        details.extend(line.lines().enumerate().map(|(index, part)| {
+            if part.is_empty() {
+                String::new()
+            } else if index == 0 {
+                format!(" {part}")
+            } else {
+                part.to_string()
+            }
+        }));
+    }
+    details
 }
 
 fn push_separator(lines: &mut Vec<String>, allow_plain_spacing: bool) {

@@ -38,6 +38,9 @@ pub enum Commands {
         /// Continue without saving the current unsaved profile first
         #[arg(long)]
         force: bool,
+        /// Show status for the loaded profile after a successful load
+        #[arg(long)]
+        with_status: bool,
     },
     /// List saved profiles
     List {
