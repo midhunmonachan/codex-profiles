@@ -93,8 +93,8 @@ codex-profiles load --label work --force
       <td>Save current <code>auth.json</code><br/>Optional label</td>
     </tr>
     <tr>
-      <td width="43%"><code>codex-profiles load</code><br/><code>(--label &lt;name&gt; | --id &lt;profile-id&gt;)</code><br/><code>[--force]</code></td>
-      <td>Load a saved profile<br/>Choose a target profile and force when needed</td>
+      <td width="43%"><code>codex-profiles load</code><br/><code>(--label &lt;name&gt; | --id &lt;profile-id&gt;)</code><br/><code>[--force] [--with-status]</code></td>
+      <td>Load a saved profile<br/>Optionally show status after loading</td>
     </tr>
     <tr>
       <td width="43%"><code>codex-profiles list</code><br/><code>[--show-id] [--json]</code></td>
