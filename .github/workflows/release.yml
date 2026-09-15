@@ -94,10 +94,10 @@ jobs:
         with:
           toolchain: 1.94.0
           components: rustfmt, clippy
-      - uses: taiki-e/install-action@aba36d755ec7ca22d38b12111787c26115943952 # v2
+      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
         with:
           tool: cargo-audit@0.22.1
-      - uses: taiki-e/install-action@aba36d755ec7ca22d38b12111787c26115943952 # v2
+      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
         with:
           tool: cargo-nextest@0.9.129
       - name: Cache cargo bin
@@ -108,7 +108,7 @@ jobs:
           key: ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-cargo-bin
           restore-keys: |
             ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-cargo-bin
-      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         continue-on-error: true
         with:
           shared-key: ${{ runner.os }}-verify-${{ hashFiles('rust-toolchain.toml') }}
@@ -156,7 +156,7 @@ jobs:
           key: ${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml') }}-cargo-bin
           restore-keys: |
             ${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml') }}-cargo-bin
-      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         continue-on-error: true
         with:
           shared-key: ${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml') }}
@@ -214,7 +214,7 @@ jobs:
           scripts/verify-artifacts.sh "${version}" dist
 
       - name: Generate artifact attestations
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: |
             dist/release/*
