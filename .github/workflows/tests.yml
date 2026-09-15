@@ -70,3 +70,29 @@ jobs:
 
       - name: Run checks
         run: scripts/check.sh --no-audit
+      - name: Smoke test executable and npm package
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --bin codex-profiles
+          binary=codex-profiles
+          case "${RUNNER_OS}-${RUNNER_ARCH}" in
+            Linux-X64) target=x86_64-unknown-linux-gnu ;;
+            macOS-ARM64) target=aarch64-apple-darwin ;;
+            Windows-X64) target=x86_64-pc-windows-msvc; binary=codex-profiles.exe ;;
+            *) echo "Unsupported smoke-test runner"; exit 1 ;;
+          esac
+          python scripts/smoke-cli.py --binary "target/debug/${binary}"
+          version=$(node -p "require('./package.json').version")
+          artifact_dir="target/npm-smoke/artifacts/codex-profiles-${target}"
+          mkdir -p "${artifact_dir}" target/npm-smoke/packages
+          cp "target/debug/${binary}" "${artifact_dir}/${binary}"
+          scripts/package-npm.sh "${version}" target/npm-smoke/artifacts target/npm-smoke/staging
+          for package_dir in target/npm-smoke/staging/*; do
+            npm pack "./${package_dir}" --pack-destination target/npm-smoke/packages
+          done
+          npm pack --pack-destination target/npm-smoke/packages
+          python scripts/smoke-cli.py --npm-packages target/npm-smoke/packages
+      - name: Test release tag helper
+        if: runner.os == 'Linux'
+        run: python scripts/test-release-tag.py

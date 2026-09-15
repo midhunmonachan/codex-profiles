@@ -29,6 +29,9 @@ fn run_cli_with_args(args: Vec<std::ffi::OsString>) -> Result<(), String> {
                 println!();
                 return Ok(());
             }
+            if err.kind() == ErrorKind::DisplayVersion {
+                return err.print().map_err(|err| err.to_string());
+            }
             return Err(err.to_string());
         }
     };

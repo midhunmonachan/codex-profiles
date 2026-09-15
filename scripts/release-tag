@@ -112,7 +112,8 @@ if "optionalDependencies" in data:
     }
 path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 PY
-  git add Cargo.toml package.json
+  cargo update --workspace --offline
+  git add Cargo.toml Cargo.lock package.json
   git commit -m "chore: bump version to v${new_ver}"
 
   cargo_ver="${new_ver}"
