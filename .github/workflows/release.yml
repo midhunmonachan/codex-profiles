@@ -94,21 +94,21 @@ jobs:
         with:
           toolchain: 1.94.0
           components: rustfmt, clippy
-      - uses: taiki-e/install-action@aba36d755ec7ca22d38b12111787c26115943952 # v2
+      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
         with:
           tool: cargo-audit@0.22.1
-      - uses: taiki-e/install-action@aba36d755ec7ca22d38b12111787c26115943952 # v2
+      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
         with:
           tool: cargo-nextest@0.9.129
       - name: Cache cargo bin
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         continue-on-error: true
         with:
           path: ~/.cargo/bin
           key: ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-cargo-bin
           restore-keys: |
             ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-cargo-bin
-      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         continue-on-error: true
         with:
           shared-key: ${{ runner.os }}-verify-${{ hashFiles('rust-toolchain.toml') }}
@@ -149,14 +149,14 @@ jobs:
           toolchain: 1.94.0
           targets: ${{ matrix.target }}
       - name: Cache cargo bin
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         continue-on-error: true
         with:
           path: ~/.cargo/bin
           key: ${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml') }}-cargo-bin
           restore-keys: |
             ${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml') }}-cargo-bin
-      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         continue-on-error: true
         with:
           shared-key: ${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml') }}
@@ -169,7 +169,7 @@ jobs:
           echo "Build output:"
           ls -la target/${{ matrix.target }}/release || true
       - name: Upload binary
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: codex-profiles-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/${{ matrix.binary }}
@@ -189,12 +189,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
         with:
           toolchain: 1.94.0
-      - uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24.14.0
           registry-url: https://registry.npmjs.org
       - name: Cache cargo bin
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         continue-on-error: true
         with:
           path: ~/.cargo/bin
@@ -214,7 +214,7 @@ jobs:
           scripts/verify-artifacts.sh "${version}" dist
 
       - name: Generate artifact attestations
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: |
             dist/release/*
@@ -302,7 +302,7 @@ jobs:
           publish_if_missing "dist/npm-packages/codex-profiles-${version}.tgz"
 
       - name: Create or update GitHub release
-        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ needs.tag-check.outputs.tag }}
           files: |
