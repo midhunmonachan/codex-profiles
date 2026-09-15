@@ -142,6 +142,7 @@ codex-profiles load --label work --force
 
 ## More Docs
 
+- [Client compatibility and credential storage](docs/compatibility.md)
 - [Release verification guide](https://github.com/midhunmonachan/codex-profiles/blob/main/docs/verification.md)
 - [Contribution guide](https://github.com/midhunmonachan/codex-profiles/blob/main/CONTRIBUTING.md)
 
@@ -159,7 +160,10 @@ codex-profiles load --label work --force
 <details>
 <summary>Is my auth file uploaded anywhere?</summary>
 
-> No. Everything stays on your machine. This tool only copies files locally
+> Saved profiles stay on your machine. `status` sends the selected account's access
+> token to the configured allowed usage endpoint and may refresh expired tokens
+> through OpenAI. Update checks contact package/release services. Export bundles
+> contain credentials and should be treated like passwords.
 </details>
 
 <details>

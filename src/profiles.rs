@@ -392,6 +392,7 @@ pub fn load_profile(
     with_status: bool,
     json: bool,
 ) -> Result<(), String> {
+    crate::ensure_file_auth_store(&paths.auth)?;
     let use_color_err = use_color_stderr();
     let use_color_out = use_color_stdout();
     let no_profiles = format_no_profiles(paths, use_color_err);
@@ -1279,6 +1280,8 @@ fn cleanup_imported_profiles(paths: &Paths, ids: &[String]) {
 }
 
 fn tighten_export_permissions(path: &Path) -> Result<(), String> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

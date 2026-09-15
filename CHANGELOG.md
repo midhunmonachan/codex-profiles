@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-14
+
+### Fixed
+
+- Updated `crossbeam-epoch`, `rustls`, `rustls-webpki`, and transitive `anyhow` dependencies
+  to address the September 2026 security-audit findings.
+- Honor `CODEX_HOME` directly for credentials, configuration, and profile storage.
+- Match Codex authentication-mode precedence, reject unsupported externally managed
+  authentication, and align OAuth refresh request fields with current upstream source.
+- Read the documented `cli_auth_credentials_store` setting using TOML scope rules;
+  keep the earlier `_mode` spelling as a fallback and reject invalid configuration.
+- Refuse `load` into unsupported credential stores before modifying credentials or
+  the profile index, including with `--force`.
+- Read usage endpoint configuration only from the TOML root table.
+- Fix Windows test portability and compile warnings, including complete mock HTTP request reads.
+
+### Documentation
+
+- Explain CLI/IDE/desktop compatibility limits, storage modes, custom home paths,
+  and network use during usage checks and credential refresh.
+
 ## [0.3.0]
 
 ### Added
@@ -127,7 +148,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pre-commit hooks for code quality
 - Binary releases for 5 platforms (Linux x64/ARM64, macOS Intel/Apple Silicon, Windows x64)
 
-[Unreleased]: https://github.com/midhunmonachan/codex-profiles/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/midhunmonachan/codex-profiles/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/midhunmonachan/codex-profiles/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/midhunmonachan/codex-profiles/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/midhunmonachan/codex-profiles/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/midhunmonachan/codex-profiles/releases/tag/v0.1.0

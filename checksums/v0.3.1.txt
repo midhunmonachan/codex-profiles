@@ -1,0 +1,13 @@
+30495084e4231082c500d415388ecb5e5d508d2c5d9a3cbf2fd95d55fd0b5ced  codex-profiles-aarch64-apple-darwin.tar.gz
+dd5640b5ec0e89e1cea5c6dc6f5d273c4734f8fd4bdbabd328e683b0a21a6cdd  codex-profiles-aarch64-unknown-linux-gnu.tar.gz
+fde2d5073231c7941a7224df0cfe3480e6f6e979deb988c5e2070f3dd8652d49  codex-profiles-x86_64-apple-darwin.tar.gz
+45f3147f31106a39e1f027527edff9b728054fac2387e2c84b5085716a2db988  codex-profiles-x86_64-pc-windows-msvc.exe.zip
+1083b8d4113d42f2bd2bff10317dc91047146ec74bf7398ecf02a16a74b7cc15  codex-profiles-x86_64-unknown-linux-gnu.tar.gz
+e23d320f95e31cfee6cbc16cb101e287b958b3ee5fd76b2ca258381266cb60d0  codex-profiles-0.3.1.tgz
+d35306cde6357326f813b651cd7c7eb4507277ef1c010a7cb137a495567ee0c8  codex-profiles-darwin-arm64-0.3.1.tgz
+31c90b2f9935afaaf9470c83567f4948b81b9060593e10f6a34548f472c1f5bc  codex-profiles-darwin-x64-0.3.1.tgz
+e0ac8990cb7fb034da3e985cb833b782854fc4a76ffb4b576f43301e3bf4d72a  codex-profiles-linux-arm64-0.3.1.tgz
+0f4ae0af3f9f2c7533e933c84e0629118a9620a967a6945403f497223bb1312f  codex-profiles-linux-x64-0.3.1.tgz
+8c1a75a94198414942dfdbb8a558aad1b4cc988ac1cc57392c5e2e22bc2af1ce  codex-profiles-win32-x64-0.3.1.tgz
+08340d4f7ebd13d455dc72e6cb57268841ef61d8518eb5f54a6afb0668970461  codex-profiles-0.3.1.crate
+231a2b0d79be9cc5cf2fe7356c591b1c71197a32eda9b096f2a4c72020e3aa1e  codex-profiles.rb

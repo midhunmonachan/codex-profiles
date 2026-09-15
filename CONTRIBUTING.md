@@ -54,6 +54,29 @@ make test
 make coverage
 ```
 
+## Dependency maintenance and merge checks
+
+Dependabot checks Rust dependencies (including transitive dependencies) and GitHub
+Actions weekly. Minor and patch version updates are grouped; major updates stay
+separate. Security-update PRs are enabled separately in repository settings and
+are not limited to the weekly version-update schedule. Updates are reviewed and
+tested before merging; they are not automatically merged.
+
+The npm platform packages are versioned together by the release process, so they
+are not independently updated by Dependabot.
+
+Every PR, including documentation-only changes, and every push to `main` runs the
+Windows, macOS, Linux, and security-audit checks. The `main` ruleset requires these
+GitHub Actions checks against an up-to-date branch, a pull request, and resolved
+review conversations. It prevents force pushes and branch deletion, with no
+admin or automation bypass configured. A second person's approval is not required for this
+single-maintainer repository. The ruleset configuration is recorded in
+`.github/main-ruleset.json`; editing that file alone does not update GitHub settings.
+
+Releases publish attested checksums alongside their release assets, which is the
+location used by the installer and verification guide. They do not push checksum
+copies directly to protected `main`. Existing historical copies remain available.
+
 ## Pre-commit hook
 
 Install the repo-managed hook wrapper (so updates are picked up automatically):

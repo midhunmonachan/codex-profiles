@@ -3,10 +3,12 @@ name: tests
 on:
   pull_request:
     branches: [main]
-    paths-ignore:
-      - "**/*.md"
-      - "docs/**"
+  push:
+    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: tests-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -32,12 +34,12 @@ jobs:
         with:
           toolchain: 1.94.0
 
-      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         continue-on-error: true
         with:
           shared-key: ${{ runner.os }}-tests-${{ hashFiles('rust-toolchain.toml') }}
       - name: Cache cargo bin
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         continue-on-error: true
         with:
           path: ~/.cargo/bin
@@ -45,7 +47,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-cargo-bin
       - name: Install nextest
-        uses: taiki-e/install-action@aba36d755ec7ca22d38b12111787c26115943952 # v2
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
         with:
           tool: cargo-nextest@0.9.129
 

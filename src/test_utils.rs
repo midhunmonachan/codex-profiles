@@ -3,7 +3,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use std::cell::Cell;
 use std::env;
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
@@ -101,8 +101,25 @@ pub(crate) fn spawn_server(response: String) -> String {
     let addr = listener.local_addr().unwrap();
     thread::spawn(move || {
         if let Ok((mut stream, _)) = listener.accept() {
-            let mut buf = [0u8; 4096];
-            let _ = stream.read(&mut buf);
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
+            // Consume the complete request before closing the socket. Windows
+            // resets a connection closed with unread request-body bytes.
+            let mut reader = BufReader::new(&mut stream);
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse::<usize>().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
             let _ = stream.write_all(response.as_bytes());
         }
     });
