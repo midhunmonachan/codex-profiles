@@ -7,10 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-09-15
+
 ### Added
 
-- `load --with-status` displays status after switching profiles, with optional JSON
-  output. Status retrieval failures do not fail a successful profile switch.
+- `load --with-status` shows usage and reset times after switching profiles.
+  Supports JSON output, and the profile still switches if the status check fails.
+  Thanks to @Chaitanya-Keyal for the contribution.
+
+### Changed
+
+- Updated Rust dependencies, including the `serde_with` security fix.
+- Updated release and test tools, added weekly dependency checks, and required
+  passing checks before merging.
+- Added a CI check for the project's 90% minimum line coverage.
 
 ## [0.3.1] - 2026-09-14
 

@@ -75,15 +75,6 @@ codex-profiles load --label work --force
 
 ## Usage
 
-Add `--with-status` to show usage and reset times after switching profiles:
-
-```bash
-codex-profiles load --label work --with-status
-```
-
-If the status check fails, the profile still switches. Add `--json` if you need
-the result in JSON for a script.
-
 > [!NOTE]
 > Codex Profiles data is stored under `~/.codex/profiles/` on your machine
 
@@ -103,7 +94,7 @@ the result in JSON for a script.
     </tr>
     <tr>
       <td width="43%"><code>codex-profiles load</code><br/><code>(--label &lt;name&gt; | --id &lt;profile-id&gt;)</code><br/><code>[--force] [--with-status]</code></td>
-      <td>Load a saved profile<br/>Optionally show status after loading</td>
+      <td>Load a saved profile<br/>Add <code>--with-status</code> to show usage and reset times</td>
     </tr>
     <tr>
       <td width="43%"><code>codex-profiles list</code><br/><code>[--show-id] [--json]</code></td>
@@ -147,6 +138,7 @@ the result in JSON for a script.
 ### Notes
 
 - `load` and `delete` are interactive unless you pass `--label` or `--id`
+- With `load --with-status`, the profile still switches even if the status check fails
 - Export bundles contain secrets
 
 ## More Docs
