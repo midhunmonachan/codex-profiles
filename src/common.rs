@@ -14,13 +14,14 @@ use std::cell::Cell;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+use crate::COMMON_ERR_SET_PERMISSIONS;
 use crate::{
     COMMON_ERR_CREATE_DIR, COMMON_ERR_CREATE_PROFILES_DIR, COMMON_ERR_CREATE_TEMP,
     COMMON_ERR_EXISTS_NOT_DIR, COMMON_ERR_EXISTS_NOT_FILE, COMMON_ERR_GET_TIME,
     COMMON_ERR_INVALID_FILE_NAME, COMMON_ERR_READ_FILE, COMMON_ERR_READ_METADATA,
     COMMON_ERR_REPLACE_FILE, COMMON_ERR_RESOLVE_HOME, COMMON_ERR_RESOLVE_PARENT,
-    COMMON_ERR_SET_PERMISSIONS, COMMON_ERR_SET_TEMP_PERMISSIONS, COMMON_ERR_WRITE_LOCK_FILE,
-    COMMON_ERR_WRITE_TEMP,
+    COMMON_ERR_SET_TEMP_PERMISSIONS, COMMON_ERR_WRITE_LOCK_FILE, COMMON_ERR_WRITE_TEMP,
 };
 
 const UNEXPECTED_HTTP_BODY_MAX_BYTES: usize = 1000;
@@ -98,8 +99,10 @@ fn maybe_fail(_step: usize) -> std::io::Result<()> {
 }
 
 pub fn resolve_paths() -> Result<Paths, String> {
-    let home_dir = resolve_home_dir().ok_or_else(|| COMMON_ERR_RESOLVE_HOME.to_string())?;
-    let codex_dir = home_dir.join(".codex");
+    let codex_dir = resolve_codex_dir_with(
+        env::var_os("CODEX_HOME").map(PathBuf::from),
+        resolve_home_dir(),
+    )?;
     let auth = codex_dir.join("auth.json");
     let profiles = codex_dir.join("profiles");
     let profiles_index = profiles.join("profiles.json");
@@ -113,6 +116,56 @@ pub fn resolve_paths() -> Result<Paths, String> {
         update_cache,
         profiles_lock,
     })
+}
+
+fn resolve_codex_dir_with(
+    codex_home: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Result<PathBuf, String> {
+    if let Some(path) = non_empty_path(codex_home) {
+        let metadata = fs::metadata(&path)
+            .map_err(|err| format!("Cannot read CODEX_HOME {}: {err}", path.display()))?;
+        if !metadata.is_dir() {
+            return Err(format!("CODEX_HOME {} is not a directory", path.display()));
+        }
+        return path
+            .canonicalize()
+            .map_err(|err| format!("Cannot canonicalize CODEX_HOME {}: {err}", path.display()));
+    }
+    home.map(|path| path.join(".codex"))
+        .ok_or_else(|| COMMON_ERR_RESOLVE_HOME.to_string())
+}
+
+/// Read only a root-level string setting. Never include configuration contents
+/// in errors: provider configuration may contain credentials.
+pub(crate) fn read_config_string(path: &Path, keys: &[&str]) -> Result<Option<String>, String> {
+    let contents = match fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(format!(
+                "Cannot read configuration {}: {err}",
+                path.display()
+            ));
+        }
+    };
+    let config: toml::Table = contents
+        .parse()
+        .map_err(|_| format!("Invalid TOML configuration in {}", path.display()))?;
+    for key in keys {
+        if let Some(value) = config.get(*key) {
+            return value
+                .as_str()
+                .map(|value| Some(value.to_string()))
+                .ok_or_else(|| {
+                    format!(
+                        "Configuration setting {key} must be a string in {}",
+                        path.display()
+                    )
+                });
+        }
+    }
+    Ok(None)
 }
 
 fn resolve_home_dir() -> Option<PathBuf> {
@@ -226,18 +279,11 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), String> {
     write_atomic_with_permissions(path, contents, permissions)
 }
 
+#[cfg(unix)]
 pub fn write_atomic_with_mode(path: &Path, contents: &[u8], mode: u32) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let permissions = fs::Permissions::from_mode(mode);
-        write_atomic_with_permissions(path, contents, Some(permissions))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = mode;
-        write_atomic_with_permissions(path, contents, None)
-    }
+    use std::os::unix::fs::PermissionsExt;
+    let permissions = fs::Permissions::from_mode(mode);
+    write_atomic_with_permissions(path, contents, Some(permissions))
 }
 
 pub fn write_atomic_private(path: &Path, contents: &[u8]) -> Result<(), String> {
@@ -321,7 +367,10 @@ fn write_atomic_with_permissions(
                     if path.exists() {
                         let _ = fs::remove_file(path);
                     }
-                    if fs::rename(&tmp_path, path).is_ok() {
+                    if maybe_fail(FAIL_WRITE_RENAME)
+                        .and_then(|_| fs::rename(&tmp_path, path))
+                        .is_ok()
+                    {
                         return Ok(());
                     }
                 }
@@ -706,6 +755,64 @@ mod tests {
     }
 
     #[test]
+    fn codex_home_is_used_directly_and_takes_precedence() {
+        let dir = tempfile::tempdir().unwrap();
+        let custom = dir.path().to_path_buf();
+        let expected = custom.canonicalize().unwrap();
+        assert_eq!(
+            resolve_codex_dir_with(Some(custom.clone()), Some(PathBuf::from("home"))).unwrap(),
+            expected
+        );
+        assert_eq!(
+            resolve_codex_dir_with(Some(custom), None).unwrap(),
+            expected
+        );
+        for value in [None, Some(PathBuf::from(""))] {
+            assert_eq!(
+                resolve_codex_dir_with(value, Some(PathBuf::from("home"))).unwrap(),
+                PathBuf::from("home/.codex")
+            );
+        }
+        assert!(resolve_codex_dir_with(None, None).is_err());
+        let missing = dir.path().join("missing");
+        assert!(
+            resolve_codex_dir_with(Some(missing), None)
+                .unwrap_err()
+                .contains("CODEX_HOME")
+        );
+        let file = dir.path().join("file");
+        fs::write(&file, "").unwrap();
+        assert!(
+            resolve_codex_dir_with(Some(file), None)
+                .unwrap_err()
+                .contains("not a directory")
+        );
+    }
+
+    #[test]
+    fn config_reader_respects_toml_scope_and_redacts_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        assert_eq!(read_config_string(&path, &["setting"]).unwrap(), None);
+        fs::write(
+            &path,
+            "setting = 'root' # comment\n[nested]\nsetting = 'nested'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_config_string(&path, &["setting"]).unwrap().as_deref(),
+            Some("root")
+        );
+        fs::write(&path, "[nested]\nsetting = 'nested'\n").unwrap();
+        assert_eq!(read_config_string(&path, &["setting"]).unwrap(), None);
+        for contents in ["setting = 42", "setting = 'private-secret-value"] {
+            fs::write(&path, contents).unwrap();
+            let error = read_config_string(&path, &["setting"]).unwrap_err();
+            assert!(!error.contains("private-secret-value"));
+        }
+    }
+
+    #[test]
     fn resolve_home_dir_prefers_codex_env() {
         let out = resolve_home_dir_with(
             Some(PathBuf::from("/tmp/codex")),
@@ -918,6 +1025,7 @@ mod tests {
         assert_eq!(out, PathBuf::from("/tmp/user"));
     }
 
+    #[cfg(windows)]
     #[test]
     fn resolve_home_dir_uses_drive() {
         let out = resolve_home_dir_with(
@@ -926,7 +1034,7 @@ mod tests {
             None,
             None,
             Some(PathBuf::from("C:")),
-            Some(PathBuf::from("Users")),
+            Some(PathBuf::from("\\Users")),
         )
         .unwrap();
         assert_eq!(out, PathBuf::from("C:/Users"));
@@ -1064,6 +1172,7 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
     #[test]
     fn write_atomic_permissions_error() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -25,6 +25,7 @@ const API_KEY_SUFFIX_LEN: usize = 16;
 const REFRESH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR: &str = "CODEX_REFRESH_TOKEN_URL_OVERRIDE";
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const CLIENT_ID_OVERRIDE_ENV_VAR: &str = "CODEX_APP_SERVER_LOGIN_CLIENT_ID";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AuthStoreMode {
@@ -126,13 +127,7 @@ pub fn read_tokens(path: &Path) -> Result<Tokens, String> {
 }
 
 pub fn read_auth_file(path: &Path) -> Result<AuthFile, String> {
-    let store_mode = read_auth_store_mode_for_path(path)?;
-    if store_mode != AuthStoreMode::File {
-        return Err(crate::msg1(
-            AUTH_ERR_UNSUPPORTED_STORE_MODE,
-            store_mode.as_str(),
-        ));
-    }
+    ensure_file_auth_store(path)?;
 
     let data = std::fs::read_to_string(path).map_err(|err| {
         if err.kind() == std::io::ErrorKind::NotFound {
@@ -143,7 +138,44 @@ pub fn read_auth_file(path: &Path) -> Result<AuthFile, String> {
     })?;
     let auth: AuthFile = serde_json::from_str(&data)
         .map_err(|err| crate::msg2(AUTH_ERR_INVALID_JSON_RELOGIN, path.display(), err))?;
-    Ok(auth)
+    // Match Codex AuthDotJson::resolved_mode without exposing unsupported
+    // credential material through the public AuthFile model.
+    let raw: serde_json::Value = serde_json::from_str(&data)
+        .map_err(|err| crate::msg2(AUTH_ERR_INVALID_JSON_RELOGIN, path.display(), err))?;
+    let explicit_mode = raw.get("auth_mode").filter(|value| !value.is_null());
+    let mode = match explicit_mode {
+        Some(value) => value
+            .as_str()
+            .ok_or_else(|| "Invalid auth_mode: expected a string".to_string())?,
+        None if raw
+            .get("personal_access_token")
+            .is_some_and(|v| !v.is_null()) =>
+        {
+            "personalAccessToken"
+        }
+        None if raw.get("bedrock_api_key").is_some_and(|v| !v.is_null()) => "bedrockApiKey",
+        None if raw.get("bedrock_access_keys").is_some_and(|v| !v.is_null()) => "bedrockAccessKeys",
+        None if auth.openai_api_key.is_some() => "apikey",
+        None => "chatgpt",
+    };
+    match mode {
+        "apikey" if auth.openai_api_key.is_some() => Ok(AuthFile { tokens: None, ..auth }),
+        "chatgpt" => Ok(AuthFile { openai_api_key: None, ..auth }),
+        "apikey" => Err("API-key authentication has no OPENAI_API_KEY".to_string()),
+        _ => Err("Unsupported authentication mode. codex-profiles supports file-backed ChatGPT OAuth and OpenAI API keys; externally managed credentials cannot be switched here.".to_string()),
+    }
+}
+
+pub fn ensure_file_auth_store(path: &Path) -> Result<(), String> {
+    let store_mode = read_auth_store_mode_for_path(path)?;
+    if store_mode != AuthStoreMode::File {
+        return Err(crate::msg1(
+            AUTH_ERR_UNSUPPORTED_STORE_MODE,
+            store_mode.as_str(),
+        ));
+    }
+
+    Ok(())
 }
 
 pub fn read_tokens_opt(path: &Path) -> Option<Tokens> {
@@ -413,10 +445,9 @@ fn api_key_prefix(api_key: &str) -> String {
 
 #[derive(Serialize)]
 struct RefreshRequest {
-    client_id: &'static str,
+    client_id: String,
     grant_type: &'static str,
     refresh_token: String,
-    scope: &'static str,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -475,19 +506,20 @@ fn read_auth_store_mode_for_path(path: &Path) -> Result<AuthStoreMode, String> {
     let Some(config_path) = path.parent().map(|dir| dir.join("config.toml")) else {
         return Ok(AuthStoreMode::File);
     };
-    let Ok(contents) = std::fs::read_to_string(config_path) else {
-        return Ok(AuthStoreMode::File);
-    };
-    for line in contents.lines() {
-        if let Some(value) = parse_config_value(line, "cli_auth_credentials_store_mode") {
-            return parse_auth_store_mode(&value);
-        }
+    if let Some(value) = crate::common::read_config_string(
+        &config_path,
+        &[
+            "cli_auth_credentials_store",
+            "cli_auth_credentials_store_mode",
+        ],
+    )? {
+        return parse_auth_store_mode(&value);
     }
     Ok(AuthStoreMode::File)
 }
 
 fn parse_auth_store_mode(value: &str) -> Result<AuthStoreMode, String> {
-    match value.trim().to_ascii_lowercase().as_str() {
+    match value {
         "file" => Ok(AuthStoreMode::File),
         "keyring" => Ok(AuthStoreMode::Keyring),
         "auto" => Ok(AuthStoreMode::Auto),
@@ -496,51 +528,14 @@ fn parse_auth_store_mode(value: &str) -> Result<AuthStoreMode, String> {
     }
 }
 
-fn parse_config_value(line: &str, key: &str) -> Option<String> {
-    let line = line.trim();
-    if line.is_empty() || line.starts_with('#') {
-        return None;
-    }
-    let (config_key, raw_value) = line.split_once('=')?;
-    if config_key.trim() != key {
-        return None;
-    }
-    let value = strip_inline_comment(raw_value).trim();
-    if value.is_empty() {
-        return None;
-    }
-    let value = value.trim_matches('"').trim_matches('\'').trim();
-    if value.is_empty() {
-        return None;
-    }
-    Some(value.to_string())
-}
-
-fn strip_inline_comment(value: &str) -> &str {
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut escape = false;
-    for (idx, ch) in value.char_indices() {
-        match ch {
-            '"' if !in_single && !escape => in_double = !in_double,
-            '\'' if !in_double => in_single = !in_single,
-            '#' if !in_single && !in_double => return value[..idx].trim_end(),
-            _ => {}
-        }
-        escape = in_double && ch == '\\' && !escape;
-        if ch != '\\' {
-            escape = false;
-        }
-    }
-    value.trim_end()
-}
-
 fn refresh_access_token(refresh_token: &str) -> Result<RefreshResponse, String> {
     let request = RefreshRequest {
-        client_id: CLIENT_ID,
+        client_id: std::env::var(CLIENT_ID_OVERRIDE_ENV_VAR)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| CLIENT_ID.to_string()),
         grant_type: "refresh_token",
         refresh_token: refresh_token.to_string(),
-        scope: "openid profile email",
     };
     let endpoint = refresh_token_url();
     let config = ureq::Agent::config_builder()
@@ -622,6 +617,10 @@ fn update_auth_tokens(path: &Path, refreshed: &RefreshResponse) -> Result<(), St
             serde_json::Value::String(refresh_token.clone()),
         );
     }
+    root.insert(
+        "last_refresh".to_string(),
+        serde_json::json!(chrono::Utc::now().to_rfc3339()),
+    );
     let json = serde_json::to_string_pretty(&value)
         .map_err(|err| crate::msg1(AUTH_ERR_SERIALIZE_AUTH, err))?;
     write_atomic(path, format!("{json}\n").as_bytes())
@@ -686,6 +685,57 @@ mod tests {
     }
 
     #[test]
+    fn auth_mode_matches_codex_precedence_and_rejects_external_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut value = serde_json::json!({
+            "OPENAI_API_KEY": "sk-test",
+            "tokens": { "account_id": "oauth-account", "access_token": "oauth-access" }
+        });
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(is_api_key_profile(&read_tokens(&path).unwrap()));
+        value["auth_mode"] = serde_json::json!("chatgpt");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(
+            read_tokens(&path).unwrap().account_id.as_deref(),
+            Some("oauth-account")
+        );
+        value["auth_mode"] = serde_json::json!("apikey");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(is_api_key_profile(&read_tokens(&path).unwrap()));
+        for mode in [
+            "chatgptAuthTokens",
+            "agentIdentity",
+            "personalAccessToken",
+            "headers",
+            "bedrockApiKey",
+            "bedrockAccessKeys",
+            "unknown",
+        ] {
+            value["auth_mode"] = serde_json::json!(mode);
+            fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            assert!(
+                read_tokens(&path)
+                    .unwrap_err()
+                    .contains("Unsupported authentication mode")
+            );
+        }
+        value.as_object_mut().unwrap().remove("auth_mode");
+        for field in [
+            "personal_access_token",
+            "bedrock_api_key",
+            "bedrock_access_keys",
+        ] {
+            value[field] = serde_json::json!("private-credential");
+            fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            let error = read_tokens(&path).unwrap_err();
+            assert!(error.contains("Unsupported authentication mode"));
+            assert!(!error.contains("private-credential"));
+            value.as_object_mut().unwrap().remove(field);
+        }
+    }
+
+    #[test]
     fn read_tokens_refuses_non_file_store_modes() {
         let dir = tempfile::tempdir().expect("tempdir");
         let auth_path = dir.path().join("auth.json");
@@ -697,7 +747,7 @@ mod tests {
         for mode in ["keyring", "auto", "ephemeral"] {
             fs::write(
                 dir.path().join("config.toml"),
-                format!("cli_auth_credentials_store_mode = \"{mode}\"\n"),
+                format!("cli_auth_credentials_store = \"{mode}\"\n"),
             )
             .unwrap();
             let err = read_tokens(&auth_path).unwrap_err();
@@ -716,7 +766,7 @@ mod tests {
         fs::write(&auth_path, serde_json::to_string(&auth).unwrap()).unwrap();
         fs::write(
             dir.path().join("config.toml"),
-            "cli_auth_credentials_store_mode = \"file\"\n",
+            "cli_auth_credentials_store = \"file\"\n",
         )
         .unwrap();
 
@@ -1207,6 +1257,60 @@ mod tests {
         let updated = fs::read_to_string(&path).unwrap();
         assert!(updated.contains("\"account_id\": \"ws-fresh\""));
         assert!(updated.contains("\"access_token\": \"new-access\""));
+        let updated: serde_json::Value = serde_json::from_str(&updated).unwrap();
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(updated["last_refresh"].as_str().unwrap()).is_ok()
+        );
+    }
+
+    #[test]
+    fn refresh_request_matches_codex_wire_contract() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+
+        let _guard = ENV_MUTEX.lock().unwrap();
+        for client_id in [None, Some(""), Some("custom-client")] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(&mut stream);
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    assert!(reader.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                stream
+                    .write_all(
+                        http_ok_response(r#"{"access_token":"new"}"#, "application/json")
+                            .as_bytes(),
+                    )
+                    .unwrap();
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()
+            });
+            let _endpoint = set_env_guard(REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR, Some(&endpoint));
+            let _client = set_env_guard(CLIENT_ID_OVERRIDE_ENV_VAR, client_id);
+            refresh_access_token("synthetic-refresh-token").unwrap();
+            assert_eq!(
+                server.join().unwrap(),
+                serde_json::json!({
+                    "client_id": client_id.filter(|value| !value.is_empty()).unwrap_or(CLIENT_ID),
+                    "grant_type": "refresh_token",
+                    "refresh_token": "synthetic-refresh-token"
+                })
+            );
+        }
     }
 
     #[test]

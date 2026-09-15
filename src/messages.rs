@@ -25,7 +25,7 @@ pub const AUTH_ERR_PROFILE_MISSING_ACCESS_TOKEN: &str =
 pub const AUTH_ERR_PROFILE_NO_REFRESH_TOKEN: &str =
     "Error: This profile has no refresh token. Run `codex login` and save again.";
 pub const AUTH_ERR_REFRESH_STATE_CHANGED: &str = "Error: Auth changed on disk. Reload and retry.";
-pub const AUTH_ERR_UNSUPPORTED_STORE_MODE: &str = "Error: Codex auth store mode `{}` is not yet supported. Configure file-backed auth to use codex-profiles.";
+pub const AUTH_ERR_UNSUPPORTED_STORE_MODE: &str = "Error: Codex auth store mode `{}` is not yet supported. codex-profiles requires file-backed auth (cli_auth_credentials_store = \"file\"). No credential-store settings were changed.";
 pub const AUTH_ERR_REFRESH_FAILED_OTHER: &str = "Error: Token refresh failed: {}";
 pub const AUTH_ERR_INVALID_REFRESH_RESPONSE: &str = "Error: Invalid refresh response: {}";
 pub const AUTH_ERR_REFRESH_MISSING_ACCESS_TOKEN: &str =
@@ -129,6 +129,7 @@ pub const CMD_ERR_UPDATE_FAILED: &str = "Error: Update command failed: {}";
 pub const COMMON_ERR_RESOLVE_HOME: &str = "Error: Could not resolve home directory";
 pub const COMMON_ERR_EXISTS_NOT_DIR: &str = "Error: {} exists and is not a directory";
 pub const COMMON_ERR_CREATE_PROFILES_DIR: &str = "Error: Cannot create profiles directory {}: {}";
+#[cfg(unix)]
 pub const COMMON_ERR_SET_PERMISSIONS: &str = "Error: Cannot set permissions on {}: {}";
 pub const COMMON_ERR_WRITE_LOCK_FILE: &str = "Error: Cannot write profiles lock file {}: {}";
 pub const COMMON_ERR_RESOLVE_PARENT: &str = "Error: Cannot resolve parent directory for {}";

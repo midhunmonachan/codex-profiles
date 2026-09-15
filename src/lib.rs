@@ -162,7 +162,6 @@ mod tests {
     use crate::test_utils::{make_paths, set_env_guard};
     use std::ffi::OsString;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn run_cli_with_args_help() {
@@ -183,8 +182,11 @@ mod tests {
         assert!(err.contains("error"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn run_update_action_paths() {
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = crate::test_utils::ENV_MUTEX.lock().unwrap();
         let dir = tempfile::tempdir().expect("tempdir");
         let bin = dir.path().join("npm");
         fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
@@ -205,11 +207,13 @@ mod tests {
 
     #[test]
     fn run_cli_list_command() {
+        let _guard = crate::test_utils::ENV_MUTEX.lock().unwrap();
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = make_paths(dir.path());
         fs::create_dir_all(&paths.profiles).unwrap();
         let home = dir.path().to_string_lossy().into_owned();
         let _home = set_env_guard("CODEX_PROFILES_HOME", Some(&home));
+        let _codex_home = set_env_guard("CODEX_HOME", None);
         let _skip = set_env_guard("CODEX_PROFILES_SKIP_UPDATE", Some("1"));
         let cli = Cli {
             plain: true,
