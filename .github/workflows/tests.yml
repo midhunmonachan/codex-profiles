@@ -15,6 +15,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  coverage:
+    name: coverage
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
+        with:
+          toolchain: 1.94.0
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
+        with:
+          tool: cargo-llvm-cov@0.9.1
+      - name: Check line coverage
+        run: cargo llvm-cov --locked --workspace --all-features --fail-under-lines 90 --ignore-filename-regex "tests/|target/"
+
   tests:
     name: tests-${{ matrix.os }}
     runs-on: ${{ matrix.os }}

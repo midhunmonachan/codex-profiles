@@ -53,6 +53,8 @@ pub const USAGE_ERR_LOCK_HELD: &str = "Error: Could not lock profiles file: {}";
 pub const PROFILE_MSG_SAVED: &str = "Saved profile";
 pub const PROFILE_MSG_SAVED_WITH: &str = "Saved profile {}";
 pub const PROFILE_MSG_LOADED_WITH: &str = "Loaded profile {}";
+pub const PROFILE_WARN_LOADED_STATUS_FAILED: &str =
+    "Loaded profile, but status retrieval failed: {}";
 pub const PROFILE_MSG_DELETED_WITH: &str = "Deleted profile {}";
 pub const PROFILE_MSG_DELETED_COUNT: &str = "Deleted {} profiles.";
 pub const PROFILE_MSG_LABEL_SET: &str = "Set label '{}' for profile {}";

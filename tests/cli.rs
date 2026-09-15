@@ -1480,6 +1480,44 @@ fn ui_load_by_id_command() {
 }
 
 #[test]
+fn ui_load_with_status_command() {
+    let env = TestEnv::new();
+    seed_profiles(&env);
+    seed_alpha(&env);
+    let usage_body = r#"{"rate_limit":{"primary_window":{"used_percent":20,"limit_window_seconds":18000,"reset_at":2000000000}}}"#;
+    let (usage_addr, usage_handle) = start_usage_server(usage_body, 1).expect("usage server");
+    env.write_config(&format!("http://{usage_addr}/backend-api"));
+
+    let output = env.run(&["load", "--label", "beta", "--with-status"]);
+    assert!(output.contains("Loaded profile"));
+    assert!(output.contains(BETA_EMAIL));
+    assert_eq!(output.matches(BETA_EMAIL).count(), 1, "{output}");
+    assert!(!output.contains(ALPHA_EMAIL));
+    assert!(output.contains("80% left"), "{output}");
+    assert!(env.read_auth().contains(BETA_ACCOUNT));
+
+    let _ = usage_handle.join();
+}
+
+#[test]
+fn ui_load_with_status_keeps_load_success_when_usage_fails() {
+    let env = TestEnv::new();
+    seed_profiles(&env);
+    seed_alpha(&env);
+    env.write_config("http://127.0.0.1:1/backend-api");
+
+    let output = env.run_output(&["load", "--label", "beta", "--with-status"]);
+    assert!(output.status.success());
+    let stdout = ascii_only(String::from_utf8_lossy(&output.stdout).as_ref());
+    let stderr = ascii_only(String::from_utf8_lossy(&output.stderr).as_ref());
+    assert!(stdout.contains("Loaded profile"));
+    assert!(stdout.contains(BETA_EMAIL));
+    assert!(stderr.contains("Loaded profile, but status retrieval failed"));
+    assert!(stderr.contains("Could not reach usage service"));
+    assert!(env.read_auth().contains(BETA_ACCOUNT));
+}
+
+#[test]
 fn ui_load_by_id_force_skips_unsaved_prompt() {
     let env = TestEnv::new();
     seed_profiles(&env);
@@ -2687,6 +2725,15 @@ fn ui_list_preserves_invalid_profiles() {
 
 #[test]
 fn ui_status_refreshes_and_mutates_profile_on_usage_401() {
+    assert_status_refreshes_profile(&["status"]);
+}
+
+#[test]
+fn ui_load_with_status_refreshes_and_syncs_loaded_profile() {
+    assert_status_refreshes_profile(&["load", "--label", "alpha", "--with-status"]);
+}
+
+fn assert_status_refreshes_profile(command: &[&str]) {
     let env = TestEnv::new();
     let usage_body = r#"{"rate_limit":{"primary_window":{"used_percent":20,"limit_window_seconds":18000,"reset_at":2000000000}}}"#;
     let usage_ok = format!(
@@ -2716,7 +2763,7 @@ fn ui_status_refreshes_and_mutates_profile_on_usage_401() {
 
     let refresh_url = format!("http://{refresh_addr}/token");
     let output = env.run_with_env(
-        &["status"],
+        command,
         &[("CODEX_REFRESH_TOKEN_URL_OVERRIDE", refresh_url.as_str())],
     );
 
@@ -2857,6 +2904,50 @@ fn json_load_returns_success_shape() {
     assert!(profile["id"].is_string());
     assert_eq!(profile["label"], "alpha");
     assert!(profile.get("default").is_none());
+}
+
+#[test]
+fn json_load_with_status_returns_success_shape() {
+    let env = TestEnv::new();
+    seed_alpha(&env);
+    env.run(&["save", "--label", "alpha"]);
+    let usage_body = r#"{"rate_limit":{"primary_window":{"used_percent":20,"limit_window_seconds":18000,"reset_at":2000000000}}}"#;
+    let (usage_addr, usage_handle) = start_usage_server(usage_body, 1).expect("usage server");
+    env.write_config(&format!("http://{usage_addr}/backend-api"));
+
+    let raw = env.run(&["load", "--label", "alpha", "--with-status", "--json"]);
+    let v = parse_json(&raw);
+
+    assert_eq!(v["command"], "load");
+    assert_eq!(v["success"], true);
+    let profile = &v["profile"];
+    assert_eq!(profile["label"], "alpha");
+    assert_eq!(profile["status"]["id"], ALPHA_ID);
+    assert_eq!(profile["status"]["usage"]["state"], "ok");
+
+    let _ = usage_handle.join();
+}
+
+#[test]
+fn json_load_with_status_keeps_load_success_when_usage_fails() {
+    let env = TestEnv::new();
+    seed_profiles(&env);
+    seed_alpha(&env);
+    env.write_config("http://127.0.0.1:1/backend-api");
+
+    let raw = env.run(&["load", "--label", "beta", "--with-status", "--json"]);
+    let result = parse_json(&raw);
+    assert_eq!(result["command"], "load");
+    assert_eq!(result["success"], true);
+    assert_eq!(result["profile"]["label"], "beta");
+    assert_eq!(result["profile"]["status"]["usage"]["state"], "error");
+    assert!(
+        result["profile"]["status"]["error"]["summary"]["message"]
+            .as_str()
+            .expect("status error message")
+            .contains("Could not reach usage service")
+    );
+    assert!(env.read_auth().contains(BETA_ACCOUNT));
 }
 
 #[test]
