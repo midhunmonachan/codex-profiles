@@ -2,7 +2,6 @@ use chrono::{DateTime, Local, TimeZone, Utc};
 use colored::Colorize;
 use fslock::LockFile;
 use serde::{Deserialize, Serialize};
-use std::fs;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -140,55 +139,11 @@ struct UsageBucket {
 
 pub fn read_base_url(paths: &Paths) -> Result<String, String> {
     let config_path = paths.codex.join("config.toml");
-    if let Ok(contents) = fs::read_to_string(config_path) {
-        for line in contents.lines() {
-            if let Some(value) = parse_config_value(line, "chatgpt_base_url") {
-                return validate_base_url(&value);
-            }
-        }
+    match crate::common::read_config_string(&config_path, &["chatgpt_base_url"])? {
+        Some(value) => validate_base_url(&value),
+        None => Ok(DEFAULT_BASE_URL.to_string()),
     }
-    Ok(DEFAULT_BASE_URL.to_string())
 }
-
-fn parse_config_value(line: &str, key: &str) -> Option<String> {
-    let line = line.trim();
-    if line.is_empty() || line.starts_with('#') {
-        return None;
-    }
-    let (config_key, raw_value) = line.split_once('=')?;
-    if config_key.trim() != key {
-        return None;
-    }
-    let value = strip_inline_comment(raw_value).trim();
-    if value.is_empty() {
-        return None;
-    }
-    let value = value.trim_matches('"').trim_matches('\'').trim();
-    if value.is_empty() {
-        return None;
-    }
-    Some(value.to_string())
-}
-
-fn strip_inline_comment(value: &str) -> &str {
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut escape = false;
-    for (idx, ch) in value.char_indices() {
-        match ch {
-            '"' if !in_single && !escape => in_double = !in_double,
-            '\'' if !in_double => in_single = !in_single,
-            '#' if !in_single && !in_double => return value[..idx].trim_end(),
-            _ => {}
-        }
-        escape = in_double && ch == '\\' && !escape;
-        if ch != '\\' {
-            escape = false;
-        }
-    }
-    value.trim_end()
-}
-
 fn normalize_base_url(value: &str) -> String {
     let mut base = value.trim_end_matches('/').to_string();
     if let Some((scheme, host)) = parsed_url_scheme_and_host(&base)
@@ -863,36 +818,23 @@ mod tests {
     }
 
     #[test]
-    fn config_parsing_paths() {
-        assert!(parse_config_value("", "key").is_none());
-        assert!(parse_config_value("# comment", "key").is_none());
-        assert!(parse_config_value("other = 1", "key").is_none());
-        assert!(parse_config_value("key =", "key").is_none());
-        assert_eq!(
-            parse_config_value("key = 'value'", "key"),
-            Some("value".to_string())
-        );
-        assert_eq!(
-            parse_config_value(
-                r#"chatgpt_base_url = "https://chatgpt.com/backend-api" # comment"#,
-                "chatgpt_base_url"
-            ),
-            Some("https://chatgpt.com/backend-api".to_string())
-        );
-        assert_eq!(
-            parse_config_value(
-                r#"chatgpt_base_url = "https://example.com/#/foo" # tail"#,
-                "chatgpt_base_url"
-            ),
-            Some("https://example.com/#/foo".to_string())
-        );
-        assert!(parse_config_value("other = \"value\"", "chatgpt_base_url").is_none());
-        assert!(
-            parse_config_value("chatgpt_base_url = '' # comment", "chatgpt_base_url").is_none()
-        );
-        assert_eq!(strip_inline_comment("value # comment"), "value");
+    fn base_url_ignores_nested_provider_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = make_paths(dir.path());
+        fs::create_dir_all(&paths.codex).unwrap();
+        fs::write(
+            paths.codex.join("config.toml"),
+            "[model_providers.custom]\nchatgpt_base_url = 'http://localhost:9999'\n",
+        )
+        .unwrap();
+        assert_eq!(read_base_url(&paths).unwrap(), DEFAULT_BASE_URL);
+        fs::write(
+            paths.codex.join("config.toml"),
+            "chatgpt_base_url = 'https://chatgpt.com' # comment\n",
+        )
+        .unwrap();
+        assert_eq!(read_base_url(&paths).unwrap(), DEFAULT_BASE_URL);
     }
-
     #[test]
     fn normalize_base_url_and_endpoint() {
         let url = normalize_base_url("https://chatgpt.com");
@@ -1293,12 +1235,7 @@ mod tests {
         let _guard = LOCK_TEST_MUTEX.lock().unwrap();
         let dir = tempfile::tempdir().expect("tempdir");
         let lock_dir = dir.path().join("locked");
-        fs::create_dir_all(&lock_dir).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&lock_dir, fs::Permissions::from_mode(0o400)).unwrap();
-        }
+        fs::write(&lock_dir, "not a directory").unwrap();
         let mut paths = make_paths(dir.path());
         paths.profiles_lock = lock_dir.join("profiles.lock");
         let err = lock_usage(&paths).unwrap_err();

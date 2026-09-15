@@ -258,6 +258,8 @@ fn inspect_install(_paths: &Paths) -> [Check; 2] {
 }
 
 fn inspect_auth(paths: &Paths, auth: &AuthState) -> Check {
+    #[cfg(not(unix))]
+    let _ = paths;
     match auth {
         AuthState::Missing => Check::new(Level::Warn, "auth file", "missing (run `codex login`)"),
         AuthState::Valid => {

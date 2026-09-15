@@ -192,6 +192,7 @@ impl TestEnv {
         let _guard = COMMAND_MUTEX.lock().expect("command mutex");
         let mut cmd = Command::new(&self.bin_path);
         cmd.args(args)
+            .env_remove("CODEX_HOME")
             .env("HOME", self.home_path())
             .env("CODEX_PROFILES_HOME", self.home_path())
             .env("CODEX_PROFILES_COMMAND", "codex-profiles")
@@ -303,6 +304,84 @@ fn resolve_bin_path() -> PathBuf {
         "codex-profiles"
     };
     target_dir.join(bin_name)
+}
+
+#[test]
+fn custom_codex_home_isolates_save_load_and_profile_storage() {
+    let env = TestEnv::new();
+    seed_alpha(&env);
+    let original = env.read_auth();
+    let custom = env.home_path().join("custom-codex");
+    fs::create_dir_all(&custom).unwrap();
+    let beta = serde_json::json!({"OPENAI_API_KEY": "sk-test-custom-beta"});
+    fs::write(custom.join("auth.json"), serde_json::to_vec(&beta).unwrap()).unwrap();
+    let custom_env = [("CODEX_HOME", custom.to_str().unwrap())];
+    env.run_with_env(&["save", "--label", "custom"], &custom_env);
+    fs::write(
+        custom.join("auth.json"),
+        r#"{"OPENAI_API_KEY":"sk-test-other"}"#,
+    )
+    .unwrap();
+    env.run_with_env(&["load", "--label", "custom", "--force"], &custom_env);
+    let loaded: serde_json::Value =
+        serde_json::from_slice(&fs::read(custom.join("auth.json")).unwrap()).unwrap();
+    assert_eq!(loaded, beta);
+    assert!(custom.join("profiles/profiles.json").is_file());
+    assert!(!custom.join(".codex").exists());
+    assert!(!env.profiles_dir().exists());
+    assert_eq!(env.read_auth(), original);
+}
+
+#[test]
+fn load_refuses_non_file_storage_without_changing_auth_or_index() {
+    let env = TestEnv::new();
+    seed_alpha(&env);
+    env.run(&["save", "--label", "alpha"]);
+    seed_beta(&env);
+    let original_auth = env.read_auth();
+    let index_path = env.profiles_dir().join("profiles.json");
+    let original_index = fs::read(&index_path).unwrap();
+    for key in [
+        "cli_auth_credentials_store",
+        "cli_auth_credentials_store_mode",
+    ] {
+        for mode in ["keyring", "auto", "ephemeral"] {
+            fs::write(
+                env.codex_dir().join("config.toml"),
+                format!("{key} = '{mode}'\n"),
+            )
+            .unwrap();
+            let output = env.run_output(&["load", "--label", "alpha", "--force", "--json"]);
+            assert!(!output.status.success());
+            assert!(output.stdout.is_empty());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("file-backed auth"));
+            assert_eq!(env.read_auth(), original_auth);
+            assert_eq!(fs::read(&index_path).unwrap(), original_index);
+        }
+    }
+}
+
+#[test]
+fn credential_store_config_uses_root_setting_and_canonical_precedence() {
+    let env = TestEnv::new();
+    seed_alpha(&env);
+    let config = env.codex_dir().join("config.toml");
+    fs::write(&config, "cli_auth_credentials_store = 'file'\ncli_auth_credentials_store_mode = 'keyring'\n[nested]\ncli_auth_credentials_store = 'keyring'\n").unwrap();
+    env.run(&["save", "--label", "alpha"]);
+    fs::write(
+        &config,
+        "cli_auth_credentials_store = 'keyring'\ncli_auth_credentials_store_mode = 'file'\n",
+    )
+    .unwrap();
+    assert!(env.run_expect_error(&["save"]).contains("keyring"));
+    fs::write(
+        &config,
+        "cli_auth_credentials_store = 'file\nsecret = 'private-value'",
+    )
+    .unwrap();
+    let error = env.run_expect_error(&["load", "--label", "alpha", "--force"]);
+    assert!(error.contains("Invalid TOML"));
+    assert!(!error.contains("private-value"));
 }
 
 #[test]
@@ -2902,6 +2981,7 @@ fn json_mutating_command_error_exits_nonzero_no_json_on_stdout() {
 
     let output = std::process::Command::new(&env.bin_path)
         .args(["delete", "--label", "nonexistent", "--yes", "--json"])
+        .env_remove("CODEX_HOME")
         .env("HOME", env.home_path())
         .env("CODEX_PROFILES_HOME", env.home_path())
         .env("CODEX_PROFILES_COMMAND", "codex-profiles")
