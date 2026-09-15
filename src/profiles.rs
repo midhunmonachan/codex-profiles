@@ -28,7 +28,8 @@ use crate::{
     PROFILE_PROMPT_DELETE_MANY, PROFILE_PROMPT_DELETE_ONE, PROFILE_PROMPT_DELETE_SELECTED,
     PROFILE_PROMPT_SAVE_AND_CONTINUE, PROFILE_SUMMARY_AUTH_ERROR, PROFILE_SUMMARY_ERROR,
     PROFILE_SUMMARY_FILE_MISSING, PROFILE_SUMMARY_USAGE_ERROR, PROFILE_UNSAVED_NO_MATCH,
-    PROFILE_WARN_CURRENT_NOT_SAVED_REASON, UI_ERROR_PREFIX, UI_ERROR_TWO_LINE,
+    PROFILE_WARN_CURRENT_NOT_SAVED_REASON, PROFILE_WARN_LOADED_STATUS_FAILED, UI_ERROR_PREFIX,
+    UI_ERROR_TWO_LINE,
 };
 use crate::{
     AuthFile, ProfileIdentityKey, Tokens, extract_email_and_plan, extract_profile_identity,
@@ -466,24 +467,24 @@ pub fn load_profile(
         label.clone(),
     );
     store.save(paths)?;
+    // Status may refresh credentials and reopen the store to sync the saved profile.
     drop(store);
 
-    let mut profile_json = serde_json::json!({
-        "id": selected_id,
-        "label": label,
-    });
-    if json && with_status {
-        match current_status_json_value(paths) {
-            Ok(status) => {
-                profile_json["status"] = status;
-            }
-            Err(err) => {
-                profile_json["status_error"] = serde_json::Value::String(normalize_error(&err));
+    if json {
+        let mut profile_json = serde_json::json!({
+            "id": selected_id,
+            "label": label,
+        });
+        if with_status {
+            match current_status_json_value(paths) {
+                Ok(status) => {
+                    profile_json["status"] = status;
+                }
+                Err(err) => {
+                    profile_json["status_error"] = serde_json::Value::String(normalize_error(&err));
+                }
             }
         }
-    }
-
-    if json {
         let result = CommandResultJson::success("load", profile_json);
         result.print()?;
         return Ok(());
@@ -495,10 +496,7 @@ pub fn load_profile(
     );
     print_output_block(&message);
     if with_status && let Err(err) = loaded_profile_status(paths) {
-        let message = format!(
-            "Loaded profile, but status retrieval failed: {}",
-            normalize_error(&err)
-        );
+        let message = crate::msg1(PROFILE_WARN_LOADED_STATUS_FAILED, normalize_error(&err));
         eprintln!("{}", format_warning(&message, use_color_err));
     }
     Ok(())

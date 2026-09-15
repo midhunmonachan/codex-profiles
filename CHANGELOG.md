@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `load --with-status` displays status after switching profiles, with optional JSON
+  output. Status retrieval failures do not fail a successful profile switch.
+
 ## [0.3.1] - 2026-09-14
 
 ### Fixed

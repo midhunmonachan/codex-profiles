@@ -75,6 +75,13 @@ codex-profiles load --label work --force
 
 ## Usage
 
+To show a profile's status immediately after switching, use
+`codex-profiles load --label work --with-status`. A status lookup failure produces
+a warning while keeping the successful switch. With `--json`, the command returns
+one JSON response with status under `profile.status`, including structured usage
+errors. If status cannot be constructed, `profile.status_error` contains the error.
+The load result remains successful in either case.
+
 > [!NOTE]
 > Codex Profiles data is stored under `~/.codex/profiles/` on your machine
 

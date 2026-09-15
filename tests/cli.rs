@@ -2725,6 +2725,15 @@ fn ui_list_preserves_invalid_profiles() {
 
 #[test]
 fn ui_status_refreshes_and_mutates_profile_on_usage_401() {
+    assert_status_refreshes_profile(&["status"]);
+}
+
+#[test]
+fn ui_load_with_status_refreshes_and_syncs_loaded_profile() {
+    assert_status_refreshes_profile(&["load", "--label", "alpha", "--with-status"]);
+}
+
+fn assert_status_refreshes_profile(command: &[&str]) {
     let env = TestEnv::new();
     let usage_body = r#"{"rate_limit":{"primary_window":{"used_percent":20,"limit_window_seconds":18000,"reset_at":2000000000}}}"#;
     let usage_ok = format!(
@@ -2754,7 +2763,7 @@ fn ui_status_refreshes_and_mutates_profile_on_usage_401() {
 
     let refresh_url = format!("http://{refresh_addr}/token");
     let output = env.run_with_env(
-        &["status"],
+        command,
         &[("CODEX_REFRESH_TOKEN_URL_OVERRIDE", refresh_url.as_str())],
     );
 
@@ -2917,6 +2926,28 @@ fn json_load_with_status_returns_success_shape() {
     assert_eq!(profile["status"]["usage"]["state"], "ok");
 
     let _ = usage_handle.join();
+}
+
+#[test]
+fn json_load_with_status_keeps_load_success_when_usage_fails() {
+    let env = TestEnv::new();
+    seed_profiles(&env);
+    seed_alpha(&env);
+    env.write_config("http://127.0.0.1:1/backend-api");
+
+    let raw = env.run(&["load", "--label", "beta", "--with-status", "--json"]);
+    let result = parse_json(&raw);
+    assert_eq!(result["command"], "load");
+    assert_eq!(result["success"], true);
+    assert_eq!(result["profile"]["label"], "beta");
+    assert_eq!(result["profile"]["status"]["usage"]["state"], "error");
+    assert!(
+        result["profile"]["status"]["error"]["summary"]["message"]
+            .as_str()
+            .expect("status error message")
+            .contains("Could not reach usage service")
+    );
+    assert!(env.read_auth().contains(BETA_ACCOUNT));
 }
 
 #[test]
