@@ -213,12 +213,6 @@ jobs:
           scripts/release-artifacts.sh "${version}" dist/artifacts dist
           scripts/verify-artifacts.sh "${version}" dist
 
-      - name: Capture tagged source revision
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "RELEASE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-
       - name: Generate artifact attestations
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
@@ -228,49 +222,6 @@ jobs:
             dist/homebrew/*.rb
             dist/cargo/*.crate
             dist/checksums/*
-
-      - name: Commit checksums to repo
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="${{ needs.tag-check.outputs.version }}"
-
-          # Safety gate: only commit to production repository
-          if [[ "${GITHUB_REPOSITORY}" != "midhunmonachan/codex-profiles" ]]; then
-            echo "Skipping checksum commit: not production repository (current: ${GITHUB_REPOSITORY})"
-            echo "Checksums generated but not committed to repo"
-            ls -la dist/checksums/
-            exit 0
-          fi
-
-          echo "Committing checksums to ${GITHUB_REPOSITORY}..."
-
-          # Copy checksums to repo
-          cp dist/checksums/SHA256SUMS "checksums/v${version}.txt"
-
-          # Configure git
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          # Fetch and checkout main branch (workflow starts in detached HEAD from tag)
-          git fetch origin main
-          git checkout main
-
-          # Commit and push
-          git add "checksums/v${version}.txt"
-          if git diff --cached --quiet; then
-            echo "Checksum file already committed; nothing to do"
-            exit 0
-          fi
-          git commit -m "chore: add checksums for v${version}"
-          git push origin main
-
-      - name: Restore tagged source for crates.io publish
-        if: ${{ needs.tag-check.outputs.prerelease != 'true' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          git checkout --detach "${RELEASE_SHA}"
 
       - name: Publish to crates.io
         if: ${{ needs.tag-check.outputs.prerelease != 'true' }}
