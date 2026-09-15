@@ -101,7 +101,7 @@ jobs:
         with:
           tool: cargo-nextest@0.9.129
       - name: Cache cargo bin
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         continue-on-error: true
         with:
           path: ~/.cargo/bin
@@ -149,7 +149,7 @@ jobs:
           toolchain: 1.94.0
           targets: ${{ matrix.target }}
       - name: Cache cargo bin
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         continue-on-error: true
         with:
           path: ~/.cargo/bin
@@ -194,7 +194,7 @@ jobs:
           node-version: 24.14.0
           registry-url: https://registry.npmjs.org
       - name: Cache cargo bin
-        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         continue-on-error: true
         with:
           path: ~/.cargo/bin
