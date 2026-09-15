@@ -239,6 +239,45 @@ fn seed_alpha(env: &TestEnv) {
     env.write_auth(ALPHA_ACCOUNT, ALPHA_EMAIL, ALPHA_PLAN, ALPHA_TOKEN);
 }
 
+#[test]
+fn version_flags_succeed_on_stdout_without_loading_config() {
+    let env = TestEnv::new();
+    fs::write(env.codex_dir().join("config.toml"), "invalid = [").unwrap();
+    for flag in ["--version", "-V"] {
+        let output = env.run_output(&[flag]);
+        assert!(output.status.success(), "{flag}: {output:?}");
+        assert!(output.stderr.is_empty(), "{flag}: {output:?}");
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            format!("codex-profiles {}", env!("CARGO_PKG_VERSION"))
+        );
+    }
+    assert!(!env.profiles_dir().exists());
+}
+
+#[test]
+fn information_flags_and_parse_errors_use_correct_exit_codes_and_streams() {
+    let env = TestEnv::new();
+    fs::write(env.codex_dir().join("config.toml"), "invalid = [").unwrap();
+    for args in [vec![], vec!["--help"], vec!["-h"], vec!["load", "--help"]] {
+        let output = env.run_output(&args);
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        assert!(!output.stdout.is_empty());
+        assert!(output.stderr.is_empty(), "{args:?}: {output:?}");
+    }
+    for args in [
+        vec!["--not-a-flag"],
+        vec!["not-a-command"],
+        vec!["load", "--label"],
+    ] {
+        let output = env.run_output(&args);
+        assert!(!output.status.success(), "{args:?}: {output:?}");
+        assert!(output.stdout.is_empty(), "{args:?}: {output:?}");
+        assert!(!output.stderr.is_empty());
+    }
+    assert!(!env.profiles_dir().exists());
+}
+
 fn seed_alpha_with_token(env: &TestEnv, token: &str) {
     env.write_auth(ALPHA_ACCOUNT, ALPHA_EMAIL, ALPHA_PLAN, token);
 }

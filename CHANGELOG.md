@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `--version` and `-V` now print to stdout and exit successfully.
+- Keep Cargo.lock in sync when the release helper bumps the version.
+- Test built binaries and npm packages before publishing, including version/help
+  exit codes and profile switching.
+
 ## [0.3.2] - 2026-09-15
 
 ### Added

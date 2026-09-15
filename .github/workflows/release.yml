@@ -168,6 +168,9 @@ jobs:
           cargo build --release --target ${{ matrix.target }} --bin codex-profiles --locked
           echo "Build output:"
           ls -la target/${{ matrix.target }}/release || true
+      - name: Smoke test release binary
+        shell: bash
+        run: python scripts/smoke-cli.py --binary "target/${{ matrix.target }}/release/${{ matrix.binary }}" --expected-version "${{ needs.tag-check.outputs.version }}"
       - name: Upload binary
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -212,6 +215,9 @@ jobs:
           version="${{ needs.tag-check.outputs.version }}"
           scripts/release-artifacts.sh "${version}" dist/artifacts dist
           scripts/verify-artifacts.sh "${version}" dist
+
+      - name: Smoke test npm package
+        run: python scripts/smoke-cli.py --npm-packages dist/npm-packages --expected-version "${{ needs.tag-check.outputs.version }}"
 
       - name: Generate artifact attestations
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
