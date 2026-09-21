@@ -21,7 +21,7 @@ jobs:
     env:
       CARGO_INCREMENTAL: "0"
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
         with:
           toolchain: 1.94.0
@@ -44,7 +44,7 @@ jobs:
       NEXTEST_SHOW_PROGRESS: "none"
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
