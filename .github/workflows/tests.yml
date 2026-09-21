@@ -26,7 +26,7 @@ jobs:
         with:
           toolchain: 1.94.0
           components: llvm-tools-preview
-      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
+      - uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908 # v2
         with:
           tool: cargo-llvm-cov@0.9.1
       - name: Check line coverage
@@ -64,7 +64,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}-cargo-bin
       - name: Install nextest
-        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
+        uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908 # v2
         with:
           tool: cargo-nextest@0.9.129
 
