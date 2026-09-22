@@ -1364,10 +1364,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn write_atomic_reports_repeated_temp_open_failure() {
-        // procfs is intentionally not writable. The path is never modified;
-        // this exercises the bounded retry path for create_new failures.
-        let err = write_atomic(Path::new("/proc/self/status"), b"data").unwrap_err();
-        assert!(err.contains("Failed to create temp file"));
+        // A maximum-length target name is valid, but the generated temporary
+        // name adds a suffix and therefore exceeds the Unix component limit.
+        // This exercises bounded retries for create_new failures without
+        // relying on Linux-only procfs paths or directory permissions.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x".repeat(255));
+        let err = write_atomic(&path, b"data").unwrap_err();
+        assert!(err.contains("Failed to create temp file"), "{err}");
     }
 
     #[test]
