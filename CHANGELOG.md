@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Raise the required Rust line coverage from 90% to 100% locally and in CI.
+- Update Rust dependencies and pinned GitHub Actions across the release and CI
+  workflows.
 
 ### Fixed
 
