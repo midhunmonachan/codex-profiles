@@ -543,7 +543,8 @@ fn incomplete_identity_with_whitespace_principal_is_rejected() {
     );
 }
 
-#[cfg(unix)]
+// APFS rejects invalid UTF-8 before profile discovery can inspect the entry.
+#[cfg(target_os = "linux")]
 #[test]
 fn non_utf8_profile_names_are_ignored() {
     use std::ffi::OsString;
@@ -562,7 +563,7 @@ fn non_utf8_profile_names_are_ignored() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn read_tokens_from_value() -> Tokens {
     serde_json::from_value::<AuthFile>(auth("account"))
         .unwrap()
