@@ -84,6 +84,9 @@ pub enum Commands {
         /// Show usage for all saved profiles
         #[arg(long, conflicts_with = "label", conflicts_with = "id")]
         all: bool,
+        /// Show one short usage line per profile and bucket (requires --all)
+        #[arg(long, requires = "all", conflicts_with = "json")]
+        compact: bool,
         /// Show usage for the saved profile matching this label
         #[arg(
             long,

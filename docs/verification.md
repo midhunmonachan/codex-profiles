@@ -14,26 +14,32 @@ Download the release asset you want to inspect together with `SHA256SUMS` and
 
 ```bash
 TAG="vX.Y.Z"
+ASSET="codex-profiles-x86_64-unknown-linux-gnu.tar.gz"
 gh release download "$TAG" \
   --repo midhunmonachan/codex-profiles \
   --pattern 'SHA256SUMS' \
   --pattern 'release-manifest.json' \
-  --pattern 'codex-profiles-x86_64-unknown-linux-gnu.tar.gz'
+  --pattern "$ASSET"
 ```
 
 Replace `vX.Y.Z` with the release tag you want to verify.
 
-Then verify the checksums:
+Select the checksum for that asset and verify it:
 
 ```bash
-shasum -a 256 -c SHA256SUMS
+awk -v asset="$ASSET" '$2 == asset { print; found++ } END { if (found != 1) exit 1 }' \
+  SHA256SUMS > selected-SHA256SUMS &&
+shasum -a 256 -c selected-SHA256SUMS
 ```
 
 On systems with GNU coreutils:
 
 ```bash
-sha256sum -c SHA256SUMS
+sha256sum -c selected-SHA256SUMS
 ```
+
+Use the complete `SHA256SUMS` with `-c` only when all listed artifacts have been
+downloaded; otherwise the checker also reports missing files for other platforms.
 
 `release-manifest.json` records the release version, tag, commit SHA, tool
 versions, and the same per-asset hashes from `SHA256SUMS`.

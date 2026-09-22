@@ -359,8 +359,10 @@ pub(crate) fn strip_ansi(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{make_paths, set_env_guard, set_plain_guard};
+    use crate::test_utils::{ENV_MUTEX, make_paths, set_env_guard, set_plain_guard, spawn_server};
     use std::fs;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
 
     #[test]
     fn plain_toggle_affects_output() {
@@ -559,5 +561,68 @@ mod tests {
         fs::write(&paths.auth, "{}").expect("write auth");
         let hint = super::format_save_hint(&paths, false, "Run {save}", "Run {login} {save}");
         assert!(hint.contains("save"));
+    }
+
+    #[test]
+    fn colored_and_edge_rendering_branches() {
+        let _env_lock = ENV_MUTEX.lock().unwrap();
+        let _force_color = set_env_guard("FORCE_COLOR", Some("1"));
+        let _no_color = set_env_guard("NO_COLOR", None);
+        let _plain = set_plain_guard(false);
+
+        assert!(use_color_stdout());
+        assert!(use_color_stderr());
+        assert!(style_text("text", true, |text| text.bold()).contains("text"));
+        assert!(format_action("done", true).contains("done"));
+        assert!(format_cancel(true).contains(CANCELLED_MESSAGE));
+        assert!(format_warning("first\nsecond", true).contains("second"));
+        assert!(format_hint("hint", true).contains("hint"));
+        assert_eq!(format_unsaved_warning(true).len(), 2);
+        assert!(format_error("oops\nmore").contains("Error:"));
+        assert!(
+            format_profile_display(
+                Some("me@example.com".to_string()),
+                Some("Pro".to_string()),
+                Some("work".to_string()),
+                true,
+                true,
+            )
+            .contains("me@example.com")
+        );
+        assert!(
+            format_profile_display(Some("me@example.com".to_string()), None, None, false, true,)
+                .contains("me@example.com")
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let paths = make_paths(dir.path());
+        assert!(format_no_profiles(&paths, true).contains("codex login"));
+        let _ = inquire_select_render_config();
+        assert!(is_inquire_cancel(
+            &inquire::error::InquireError::OperationInterrupted
+        ));
+        assert!(format_command("", false).contains(command_name()));
+        assert_eq!(strip_ansi("plain"), "plain");
+        assert_eq!(strip_ansi("\u{1b}X"), "X");
+    }
+
+    #[test]
+    fn nested_plain_guard_and_spawn_server_write_response() {
+        {
+            let _outer = set_plain_guard(false);
+            let _inner = set_plain_guard(true);
+            assert!(is_plain());
+        }
+        assert!(!is_plain());
+
+        let endpoint = spawn_server("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_string());
+        let authority = endpoint.strip_prefix("http://").unwrap();
+        let mut stream = TcpStream::connect(authority).unwrap();
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.contains("200 OK"));
+        assert!(response.ends_with("ok"));
     }
 }

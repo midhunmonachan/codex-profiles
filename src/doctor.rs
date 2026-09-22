@@ -10,6 +10,9 @@ use crate::{
     print_output_block, profile_files, profile_id_from_path, read_tokens, repair_profiles_metadata,
 };
 
+const CONFIG_SCOPE_CAVEAT: &str =
+    "user config only; managed requirements and CLI/environment overrides are not evaluated";
+
 #[derive(Clone, Copy, Debug, Default)]
 enum Level {
     Ok,
@@ -161,12 +164,10 @@ fn repair_storage(paths: &Paths) -> Result<Vec<String>, String> {
             return Err("Error: profiles directory exists but is not a directory".to_string());
         }
     } else {
-        fs::create_dir_all(&paths.profiles).map_err(|err| err.to_string())?;
+        create_profiles_directory(&paths.profiles)?;
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&paths.profiles, fs::Permissions::from_mode(0o700))
-                .map_err(|err| err.to_string())?;
+            set_path_mode(&paths.profiles, 0o700)?;
         }
         repairs.push("Created profiles directory".to_string());
     }
@@ -180,16 +181,7 @@ fn repair_storage(paths: &Paths) -> Result<Vec<String>, String> {
             return Err("Error: profiles lock exists but is not a file".to_string());
         }
     } else {
-        let mut options = OpenOptions::new();
-        options.create(true).append(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        options
-            .open(&paths.profiles_lock)
-            .map_err(|err| err.to_string())?;
+        create_profiles_lock(&paths.profiles_lock)?;
         repairs.push("Created profiles lock file".to_string());
     }
 
@@ -201,6 +193,7 @@ fn repair_storage(paths: &Paths) -> Result<Vec<String>, String> {
 fn collect_checks(paths: &Paths) -> Vec<Check> {
     let auth = auth_state(paths);
     let mut checks: Vec<Check> = inspect_install(paths).into_iter().collect();
+    checks.push(inspect_codex_config(paths));
     checks.push(inspect_auth(paths, &auth));
     checks.push(inspect_profiles_dir(paths));
     checks.push(inspect_profiles_index(paths));
@@ -210,6 +203,192 @@ fn collect_checks(paths: &Paths) -> Vec<Check> {
     checks.push(saved.check);
     checks.push(inspect_current_profile(paths, &auth, &saved.tokens));
     checks
+}
+
+/// Inspect only the root Codex user configuration needed to decide whether
+/// codex-profiles can safely operate on the active auth store.  This check is
+/// deliberately conservative: it never reports TOML values, it does not try
+/// to resolve the complete Codex configuration stack, and it never repairs
+/// config.toml (including when doctor runs with --fix).
+fn inspect_codex_config(paths: &Paths) -> Check {
+    let config_path = paths.codex.join("config.toml");
+    let contents = match fs::read_to_string(&config_path) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Check::new(
+                Level::Ok,
+                "codex_config",
+                format!(
+                    "missing; Codex defaults apply (auth storage=file; ChatGPT endpoint=official default); {CONFIG_SCOPE_CAVEAT}"
+                ),
+            );
+        }
+        Err(_) => {
+            return Check::new(
+                Level::Error,
+                "codex_config",
+                format!(
+                    "unreadable; auth storage and endpoint compatibility are unknown; {CONFIG_SCOPE_CAVEAT}"
+                ),
+            );
+        }
+    };
+
+    let root: toml::Table = match contents.parse() {
+        Ok(root) => root,
+        Err(_) => {
+            return Check::new(
+                Level::Error,
+                "codex_config",
+                format!(
+                    "invalid TOML; auth storage and endpoint compatibility are unknown; configuration contents were omitted; {CONFIG_SCOPE_CAVEAT}"
+                ),
+            );
+        }
+    };
+
+    let mut level = Level::Ok;
+    let mut details = vec!["valid".to_string()];
+
+    let storage = inspect_config_auth_storage(&root);
+    level = level_max(level, storage.level);
+    details.push(storage.detail);
+
+    match inspect_config_endpoint(paths, &root) {
+        EndpointState::OfficialDefault => {
+            details.push("ChatGPT endpoint=official default".to_string())
+        }
+        EndpointState::Official => details.push("ChatGPT endpoint=official host".to_string()),
+        EndpointState::Loopback => {
+            level = level_max(level, Level::Warn);
+            details.push("ChatGPT endpoint=loopback host".to_string());
+        }
+        EndpointState::Unrecognized => {
+            level = level_max(level, Level::Warn);
+            details.push("ChatGPT endpoint=unrecognized host".to_string());
+        }
+        EndpointState::Invalid => {
+            level = level_max(level, Level::Error);
+            details.push("ChatGPT endpoint=invalid or unsupported".to_string());
+        }
+    }
+
+    if root.contains_key("profile") || root.contains_key("profiles") {
+        level = level_max(level, Level::Warn);
+        details.push(
+            "legacy native profile settings detected; current Codex uses separate <name>.config.toml files"
+                .to_string(),
+        );
+    }
+
+    details.push(CONFIG_SCOPE_CAVEAT.to_string());
+    Check::new(level, "codex_config", details.join("; "))
+}
+
+struct StorageState {
+    level: Level,
+    detail: String,
+}
+
+fn inspect_config_auth_storage(root: &toml::Table) -> StorageState {
+    let value = root
+        .get("cli_auth_credentials_store")
+        .or_else(|| root.get("cli_auth_credentials_store_mode"));
+    let Some(value) = value else {
+        return StorageState {
+            level: Level::Ok,
+            detail: "auth storage=file (default; compatible)".to_string(),
+        };
+    };
+
+    let Some(mode) = value.as_str() else {
+        return StorageState {
+            level: Level::Error,
+            detail: "auth storage setting has invalid type".to_string(),
+        };
+    };
+
+    match mode {
+        "file" => StorageState {
+            level: Level::Ok,
+            detail: "auth storage=file (compatible)".to_string(),
+        },
+        "keyring" => StorageState {
+            level: Level::Warn,
+            detail: "auth storage=keyring (unsupported; Codex may keep credentials in the OS keyring, so auth.json is not authoritative)".to_string(),
+        },
+        "auto" => StorageState {
+            level: Level::Warn,
+            detail: "auth storage=auto (unsupported; Codex may use the OS keyring or encrypted secrets store, so auth.json is not authoritative)".to_string(),
+        },
+        "ephemeral" => StorageState {
+            level: Level::Warn,
+            detail: "auth storage=ephemeral (unsupported; credentials are process-local and cannot be switched from saved files)".to_string(),
+        },
+        _ => StorageState {
+            level: Level::Error,
+            detail: "auth storage setting is invalid (supported Codex values are file, keyring, auto, or ephemeral)".to_string(),
+        },
+    }
+}
+
+#[derive(Clone, Copy)]
+enum EndpointState {
+    OfficialDefault,
+    Official,
+    Loopback,
+    Unrecognized,
+    Invalid,
+}
+
+fn inspect_config_endpoint(paths: &Paths, root: &toml::Table) -> EndpointState {
+    let Some(value) = root.get("chatgpt_base_url") else {
+        return EndpointState::OfficialDefault;
+    };
+    let Some(value) = value.as_str() else {
+        return EndpointState::Invalid;
+    };
+
+    // Use the same validation and normalization as usage requests.  The
+    // returned URL is classified without ever including it in diagnostics.
+    let accepted = crate::read_base_url(paths).is_ok();
+    let shape = classify_endpoint_shape(value);
+    match (accepted, shape) {
+        (_, EndpointState::Invalid) => EndpointState::Invalid,
+        (true, EndpointState::Official) => EndpointState::Official,
+        (true, EndpointState::Loopback) => EndpointState::Loopback,
+        (false, EndpointState::Official | EndpointState::Loopback) => EndpointState::Invalid,
+        _ => EndpointState::Unrecognized,
+    }
+}
+
+fn classify_endpoint_shape(value: &str) -> EndpointState {
+    let Some((scheme, host)) = crate::parsed_url_scheme_and_host(value) else {
+        return EndpointState::Invalid;
+    };
+    if scheme == "https" && matches!(host.as_str(), "chatgpt.com" | "chat.openai.com") {
+        EndpointState::Official
+    } else if matches!(scheme.as_str(), "http" | "https") && crate::is_loopback_host(&host) {
+        EndpointState::Loopback
+    } else {
+        EndpointState::Unrecognized
+    }
+}
+
+fn level_max(left: Level, right: Level) -> Level {
+    fn rank(level: Level) -> u8 {
+        match level {
+            Level::Ok => 0,
+            Level::Info => 1,
+            Level::Warn => 2,
+            Level::Error => 3,
+        }
+    }
+    if rank(left) >= rank(right) {
+        left
+    } else {
+        right
+    }
 }
 
 fn summarize_checks(checks: &[Check]) -> Counts {
@@ -239,13 +418,22 @@ fn print_doctor_json(
         repairs,
         error,
     };
-    let json = serde_json::to_string_pretty(&payload).map_err(|err| err.to_string())?;
+    // All fields in DoctorJson are strings, counters, and vectors of those
+    // values, so serde_json cannot fail for this schema.
+    let json = serde_json::to_string_pretty(&payload)
+        .expect("doctor JSON schema serialization is infallible");
     println!("{json}");
     Ok(())
 }
 
 fn inspect_install(_paths: &Paths) -> [Check; 2] {
-    let binary = match std::env::current_exe() {
+    inspect_install_with_binary(std::env::current_exe())
+}
+
+fn inspect_install_with_binary(
+    binary_result: Result<std::path::PathBuf, std::io::Error>,
+) -> [Check; 2] {
+    let binary = match binary_result {
         Ok(path) => Check::new(Level::Ok, "binary", path.display().to_string()),
         Err(err) => Check::new(Level::Error, "binary", err.to_string()),
     };
@@ -279,7 +467,7 @@ fn inspect_auth(paths: &Paths, auth: &AuthState) -> Check {
         AuthState::Invalid(reason) => Check::new(
             Level::Error,
             "auth file",
-            format!("{reason} (run `codex login`)"),
+            format!("{} (run `codex login`)", safe_auth_error(reason)),
         ),
     }
 }
@@ -428,6 +616,24 @@ fn inspect_saved_profiles(paths: &Paths) -> SavedProfilesReport {
     SavedProfilesReport { check, tokens }
 }
 
+fn create_profiles_directory(path: &Path) -> Result<(), String> {
+    fs::create_dir_all(path).map_err(|err| err.to_string())
+}
+
+fn create_profiles_lock(path: &Path) -> Result<(), String> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(path)
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+}
+
 fn inspect_current_profile(
     paths: &Paths,
     auth: &AuthState,
@@ -435,10 +641,15 @@ fn inspect_current_profile(
 ) -> Check {
     match auth {
         AuthState::Missing => Check::new(Level::Info, "active profile", "no auth file"),
-        AuthState::Incomplete(reason) | AuthState::Invalid(reason) => Check::new(
+        AuthState::Incomplete(reason) => Check::new(
             Level::Warn,
             "active profile",
             format!("unavailable ({reason})"),
+        ),
+        AuthState::Invalid(reason) => Check::new(
+            Level::Warn,
+            "active profile",
+            format!("unavailable ({})", safe_auth_error(reason)),
         ),
         AuthState::Valid => match current_saved_id(paths, tokens) {
             Some(_) => Check::new(Level::Ok, "active profile", "saved"),
@@ -467,6 +678,14 @@ fn auth_state(paths: &Paths) -> AuthState {
                 AuthState::Invalid(err)
             }
         }
+    }
+}
+
+fn safe_auth_error(reason: &str) -> &str {
+    if reason.starts_with("Error: Codex auth store mode ") {
+        "Error: Codex uses an unsupported credential-store mode; see the codex_config check"
+    } else {
+        reason
     }
 }
 
@@ -525,14 +744,19 @@ fn repair_storage_permissions(_paths: &Paths) -> Result<Vec<String>, String> {
 
 #[cfg(unix)]
 fn set_mode_if_needed(path: &Path, mode: u32) -> Result<bool, String> {
-    use std::os::unix::fs::PermissionsExt;
-
     let current_mode = current_mode(path)?;
     if current_mode == mode {
         return Ok(false);
     }
-    fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|err| err.to_string())?;
+    set_path_mode(path, mode)?;
     Ok(true)
+}
+
+#[cfg(unix)]
+fn set_path_mode(path: &Path, mode: u32) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(|err| err.to_string())
 }
 
 #[cfg(unix)]
@@ -559,4 +783,285 @@ fn profiles_index_len_read_only(path: &Path) -> Result<usize, String> {
         })
         .unwrap_or(0);
     Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::make_paths;
+    use fslock::LockFile;
+    use std::io;
+
+    #[test]
+    fn helper_classifiers_cover_error_and_info_states() {
+        let checks = inspect_install_with_binary(Err(io::Error::other("no executable")));
+        assert!(matches!(checks[0].level, Level::Error));
+        assert_eq!(install_source_label(InstallSource::Npm), "npm");
+        assert_eq!(install_source_label(InstallSource::Bun), "bun");
+        assert_eq!(install_source_label(InstallSource::Brew), "brew");
+        assert_eq!(install_source_label(InstallSource::Unknown), "unknown");
+        assert_eq!(
+            safe_auth_error("ordinary diagnostic"),
+            "ordinary diagnostic"
+        );
+        assert_eq!(
+            safe_auth_error("Error: Codex auth store mode keyring is unsupported"),
+            "Error: Codex uses an unsupported credential-store mode; see the codex_config check"
+        );
+        assert!(matches!(level_max(Level::Info, Level::Ok), Level::Info));
+        assert!(matches!(level_max(Level::Warn, Level::Info), Level::Warn));
+        assert!(matches!(level_max(Level::Error, Level::Warn), Level::Error));
+    }
+
+    #[test]
+    fn repair_and_config_inspection_cover_unreadable_and_invalid_states() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = make_paths(dir.path());
+        fs::create_dir_all(&paths.profiles).unwrap();
+        fs::write(&paths.profiles_index, b"not a directory").unwrap();
+        fs::remove_file(&paths.profiles_index).unwrap();
+        fs::create_dir(&paths.profiles_index).unwrap();
+        assert_eq!(
+            repair_storage(&paths).unwrap_err(),
+            "Error: profiles index exists but is not a file"
+        );
+
+        fs::remove_dir(&paths.profiles_index).unwrap();
+        fs::create_dir(&paths.profiles_lock).unwrap();
+        assert_eq!(
+            repair_storage(&paths).unwrap_err(),
+            "Error: profiles lock exists but is not a file"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = make_paths(dir.path());
+        fs::create_dir_all(&paths.codex).unwrap();
+        fs::create_dir(paths.codex.join("config.toml")).unwrap();
+        let check = inspect_codex_config(&paths);
+        assert!(check.detail.contains("unreadable"));
+
+        let value: toml::Table = toml::from_str("cli_auth_credentials_store = 7").unwrap();
+        assert!(matches!(
+            inspect_config_auth_storage(&value).level,
+            Level::Error
+        ));
+        let value: toml::Table = toml::from_str("").unwrap();
+        assert!(matches!(
+            inspect_config_auth_storage(&value).level,
+            Level::Ok
+        ));
+        let value: toml::Table =
+            toml::from_str("cli_auth_credentials_store = \"unknown\"").unwrap();
+        assert!(matches!(
+            inspect_config_auth_storage(&value).level,
+            Level::Error
+        ));
+        let value: toml::Table = toml::from_str("chatgpt_base_url = 7").unwrap();
+        assert!(matches!(
+            inspect_config_endpoint(&paths, &value),
+            EndpointState::Invalid
+        ));
+
+        let bad_parent = dir.path().join("not-a-directory");
+        fs::write(&bad_parent, b"file").unwrap();
+        assert!(create_profiles_directory(&bad_parent.join("profiles")).is_err());
+        assert!(create_profiles_lock(&bad_parent.join("profiles.lock")).is_err());
+        #[cfg(unix)]
+        assert!(set_path_mode(Path::new("\0"), 0o600).is_err());
+        assert!(set_mode_if_needed(Path::new("\0"), 0o600).is_err());
+    }
+
+    #[test]
+    fn profile_checks_cover_invalid_paths_and_held_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = make_paths(dir.path());
+        paths.profiles = std::path::PathBuf::from("\0");
+        assert!(matches!(inspect_profiles_dir(&paths).level, Level::Error));
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = make_paths(dir.path());
+        fs::create_dir_all(&paths.profiles).unwrap();
+        fs::create_dir(&paths.profiles_lock).unwrap();
+        let check = inspect_profiles_lock(&paths);
+        assert!(matches!(check.level, Level::Error));
+        fs::remove_dir(&paths.profiles_lock).unwrap();
+        fs::write(&paths.profiles_lock, b"").unwrap();
+        let mut held = LockFile::open(&paths.profiles_lock).unwrap();
+        held.lock().unwrap();
+        let check = inspect_profiles_lock(&paths);
+        assert!(matches!(check.level, Level::Error));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_profiles_use_a_safe_fallback_for_non_utf8_names() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = make_paths(dir.path());
+        fs::create_dir_all(&paths.profiles).unwrap();
+        let name = std::ffi::OsString::from_vec(vec![0xff, b'.', b'j', b's', b'o', b'n']);
+        fs::write(paths.profiles.join(name), b"not JSON").unwrap();
+        let report = inspect_saved_profiles(&paths);
+        assert!(matches!(report.check.level, Level::Warn));
+    }
+
+    #[test]
+    fn doctor_fix_reports_json_error_and_plain_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = make_paths(dir.path());
+        fs::create_dir_all(&paths.codex).unwrap();
+        fs::write(&paths.profiles, b"not a directory").unwrap();
+        assert!(doctor(&paths, true, false).is_err());
+        assert!(doctor(&paths, true, true).is_ok());
+    }
+
+    #[test]
+    fn endpoint_and_storage_compatibility_cover_remaining_modes() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = make_paths(dir.path());
+        fs::create_dir_all(&paths.codex).unwrap();
+        fs::write(
+            paths.codex.join("config.toml"),
+            "chatgpt_base_url = \"https://unrecognized.example\"\n",
+        )
+        .unwrap();
+        let official: toml::Table =
+            toml::from_str("chatgpt_base_url = \"https://chatgpt.com\"").unwrap();
+        assert!(matches!(
+            inspect_config_endpoint(&paths, &official),
+            EndpointState::Invalid
+        ));
+        for mode in ["keyring", "auto", "ephemeral"] {
+            let root: toml::Table =
+                toml::from_str(&format!("cli_auth_credentials_store = \"{mode}\"")).unwrap();
+            assert!(matches!(
+                inspect_config_auth_storage(&root).level,
+                Level::Warn
+            ));
+        }
+
+        assert!(profiles_index_len_read_only(Path::new("\0")).is_err());
+        let object = dir.path().join("object.json");
+        fs::write(&object, r#"{"profiles":{"one":{},"two":{}}}"#).unwrap();
+        assert_eq!(profiles_index_len_read_only(&object).unwrap(), 2);
+        fs::write(&object, r#"{"profiles":[{},{}]}"#).unwrap();
+        assert_eq!(profiles_index_len_read_only(&object).unwrap(), 2);
+        fs::write(&object, r#"{"other":true}"#).unwrap();
+        assert_eq!(profiles_index_len_read_only(&object).unwrap(), 0);
+    }
+
+    #[test]
+    fn normal_path_checks_cover_existing_storage_and_active_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = make_paths(dir.path());
+        fs::create_dir_all(&paths.profiles).unwrap();
+        fs::write(
+            paths.codex.join("config.toml"),
+            "cli_auth_credentials_store = \"file\"\nchatgpt_base_url = \"https://chatgpt.com/backend-api\"\n",
+        )
+        .unwrap();
+        let auth = br#"{"OPENAI_API_KEY":"sk-doctor-unit-test"}"#;
+        fs::write(&paths.auth, auth).unwrap();
+        fs::write(paths.profiles.join("saved.json"), auth).unwrap();
+        fs::write(
+            &paths.profiles_index,
+            r#"{"version":3,"profiles":{"saved":{}}}"#,
+        )
+        .unwrap();
+        fs::write(&paths.profiles_lock, b"").unwrap();
+
+        let checks = collect_checks(&paths);
+        assert!(checks.iter().any(|check| {
+            check.name == "codex_config"
+                && check.detail.contains("auth storage=file (compatible)")
+                && check.detail.contains("official host")
+        }));
+        assert!(checks.iter().any(|check| {
+            check.name == "profiles directory" && check.detail.contains("profiles")
+        }));
+        assert!(
+            checks.iter().any(|check| {
+                check.name == "profiles index" && check.detail.contains("1 entries")
+            })
+        );
+        assert!(checks.iter().any(|check| {
+            check.name == "profiles lock"
+                && (check.detail == "acquired" || check.detail.contains("mode"))
+        }));
+        assert!(checks.iter().any(|check| {
+            check.name == "saved profiles" && check.detail == "1 valid, 0 invalid"
+        }));
+        assert!(
+            checks
+                .iter()
+                .any(|check| { check.name == "active profile" && check.detail == "saved" })
+        );
+
+        let repairs = repair(&paths).unwrap();
+        assert!(!repairs.is_empty(), "expected permission repairs");
+        assert!(repair(&paths).unwrap().is_empty());
+
+        doctor(&paths, false, false).unwrap();
+        doctor(&paths, false, true).unwrap();
+        doctor(&paths, true, false).unwrap();
+        doctor(&paths, true, true).unwrap();
+
+        let fresh_dir = tempfile::tempdir().unwrap();
+        let fresh = make_paths(fresh_dir.path());
+        fs::create_dir_all(&fresh.codex).unwrap();
+        // Exercise the human-readable repair report before storage exists.
+        doctor(&fresh, true, false).unwrap();
+
+        let storage_dir = tempfile::tempdir().unwrap();
+        let storage_paths = make_paths(storage_dir.path());
+        fs::create_dir_all(&storage_paths.codex).unwrap();
+        let repairs = repair_storage(&storage_paths).unwrap();
+        assert!(repairs.len() >= 2, "repairs: {repairs:?}");
+
+        let missing_dir = tempfile::tempdir().unwrap();
+        let missing = make_paths(missing_dir.path());
+        assert!(matches!(inspect_profiles_dir(&missing).level, Level::Info));
+        assert!(matches!(inspect_profiles_lock(&missing).level, Level::Info));
+        fs::create_dir_all(&missing.profiles).unwrap();
+        assert!(matches!(inspect_profiles_lock(&missing).level, Level::Info));
+
+        for (config, expected) in [
+            ("", "official default"),
+            (
+                "chatgpt_base_url = \"http://localhost:43123\"\n",
+                "loopback host",
+            ),
+            (
+                "chatgpt_base_url = \"https://unrecognized.example\"\n",
+                "unrecognized host",
+            ),
+            (
+                "chatgpt_base_url = \"http://[\"\n",
+                "invalid or unsupported",
+            ),
+        ] {
+            fs::write(fresh.codex.join("config.toml"), config).unwrap();
+            let check = inspect_codex_config(&fresh);
+            assert!(
+                check.detail.contains(expected),
+                "{config:?}: {}",
+                check.detail
+            );
+        }
+        fs::write(
+            fresh.codex.join("config.toml"),
+            "profile = \"legacy\"\n[profiles.work]\nmodel = \"private\"\n",
+        )
+        .unwrap();
+        let check = inspect_codex_config(&fresh);
+        assert!(
+            check
+                .detail
+                .contains("legacy native profile settings detected")
+        );
+        fs::write(fresh.codex.join("config.toml"), "invalid = [\n").unwrap();
+        let check = inspect_codex_config(&fresh);
+        assert!(check.detail.contains("invalid TOML"));
+    }
 }

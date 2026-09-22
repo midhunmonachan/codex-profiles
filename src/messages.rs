@@ -25,6 +25,7 @@ pub const AUTH_ERR_PROFILE_MISSING_ACCESS_TOKEN: &str =
 pub const AUTH_ERR_PROFILE_NO_REFRESH_TOKEN: &str =
     "Error: This profile has no refresh token. Run `codex login` and save again.";
 pub const AUTH_ERR_REFRESH_STATE_CHANGED: &str = "Error: Auth changed on disk. Reload and retry.";
+pub const AUTH_ERR_AMBIGUOUS_SAVED_PROFILES: &str = "Error: Active credentials match multiple saved profiles, but none has the same tokens. Save the active account before switching.";
 pub const AUTH_ERR_UNSUPPORTED_STORE_MODE: &str = "Error: Codex auth store mode `{}` is not yet supported. codex-profiles requires file-backed auth (cli_auth_credentials_store = \"file\"). No credential-store settings were changed.";
 pub const AUTH_ERR_REFRESH_FAILED_OTHER: &str = "Error: Token refresh failed: {}";
 pub const AUTH_ERR_INVALID_REFRESH_RESPONSE: &str = "Error: Invalid refresh response: {}";
@@ -33,7 +34,6 @@ pub const AUTH_ERR_REFRESH_MISSING_ACCESS_TOKEN: &str =
 pub const AUTH_ERR_INVALID_JSON: &str = "Error: Invalid JSON in {}: {}";
 pub const AUTH_ERR_INVALID_JSON_OBJECT: &str = "Error: Invalid JSON in {} (expected object)";
 pub const AUTH_ERR_INVALID_TOKENS_OBJECT: &str = "Error: Invalid tokens in {} (expected object)";
-pub const AUTH_ERR_SERIALIZE_AUTH: &str = "Error: Could not serialize auth file: {}";
 pub const AUTH_ERR_WRITE_AUTH: &str = "Error: Could not write {}: {}";
 
 pub const USAGE_UNAVAILABLE_API_KEY_TITLE: &str = "Usage unavailable for API key";
@@ -50,7 +50,6 @@ pub const USAGE_ERR_LOCK_ACQUIRE: &str =
     "Error: Could not acquire profiles lock. Ensure no other {} is running and retry.";
 pub const USAGE_ERR_LOCK_HELD: &str = "Error: Could not lock profiles file: {}";
 
-pub const PROFILE_MSG_SAVED: &str = "Saved profile";
 pub const PROFILE_MSG_SAVED_WITH: &str = "Saved profile {}";
 pub const PROFILE_MSG_LOADED_WITH: &str = "Loaded profile {}";
 pub const PROFILE_WARN_LOADED_STATUS_FAILED: &str =
@@ -64,7 +63,6 @@ pub const PROFILE_ERR_SELECTED_INVALID: &str = "Error: Selected profile is inval
 pub const PROFILE_ERR_FAILED_DELETE: &str = "Error: Failed to delete profile: {}";
 pub const PROFILE_ERR_READ_INDEX: &str = "Error: Cannot read profiles index file {}: {}";
 pub const PROFILE_ERR_INDEX_INVALID_JSON: &str = "Error: Profiles index file {} is invalid JSON";
-pub const PROFILE_ERR_SERIALIZE_INDEX: &str = "Error: Failed to serialize profiles index: {}";
 pub const PROFILE_ERR_WRITE_INDEX: &str = "Error: Failed to write profiles index file: {}";
 pub const PROFILE_ERR_LABEL_EXISTS: &str = "Error: Label '{}' already exists. {}";
 pub const PROFILE_ERR_LABEL_NOT_FOUND: &str = "Error: Label '{}' was not found. {}";
@@ -137,7 +135,7 @@ pub const COMMON_ERR_WRITE_LOCK_FILE: &str = "Error: Cannot write profiles lock 
 pub const COMMON_ERR_RESOLVE_PARENT: &str = "Error: Cannot resolve parent directory for {}";
 pub const COMMON_ERR_CREATE_DIR: &str = "Error: Cannot create directory {}: {}";
 pub const COMMON_ERR_INVALID_FILE_NAME: &str = "Error: Invalid file name {}";
-pub const COMMON_ERR_GET_TIME: &str = "Error: Failed to get time: {}";
+pub const COMMON_ERR_GET_TIME: &str = "Error: Could not determine temporary file timestamp: {}";
 pub const COMMON_ERR_CREATE_TEMP: &str = "Error: Failed to create temp file for {}: {}";
 pub const COMMON_ERR_WRITE_TEMP: &str = "Error: Failed to write temp file for {}: {}";
 pub const COMMON_ERR_SET_TEMP_PERMISSIONS: &str =

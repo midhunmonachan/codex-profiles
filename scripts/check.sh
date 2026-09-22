@@ -32,6 +32,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ "${run_audit}" -eq 1 ]] && ! command -v cargo-audit >/dev/null 2>&1; then
+  echo "Missing required tool: cargo-audit (install it or run scripts/check.sh --no-audit)" >&2
+  exit 1
+fi
+
 bash install.sh --help >/dev/null
 cargo fetch --locked
 cargo fmt --all -- --check

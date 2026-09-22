@@ -30,7 +30,7 @@ jobs:
         with:
           tool: cargo-llvm-cov@0.9.1
       - name: Check line coverage
-        run: cargo llvm-cov --locked --workspace --all-features --fail-under-lines 90 --ignore-filename-regex "tests/|target/"
+        run: cargo llvm-cov --locked --workspace --all-features --fail-under-lines 100 --ignore-filename-regex "tests/|target/"
 
   tests:
     name: tests-${{ matrix.os }}
@@ -96,3 +96,6 @@ jobs:
       - name: Test release tag helper
         if: runner.os == 'Linux'
         run: python scripts/test-release-tag.py
+      - name: Test release artifact verification
+        if: runner.os == 'Linux'
+        run: python scripts/test-release-artifacts.py

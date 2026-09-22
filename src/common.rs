@@ -10,8 +10,6 @@ use std::sync::OnceLock;
 
 #[cfg(test)]
 use std::cell::Cell;
-#[cfg(test)]
-use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
@@ -71,23 +69,26 @@ pub fn package_command_name() -> &'static str {
 }
 
 #[cfg(unix)]
-const FAIL_SET_PERMISSIONS: usize = 1;
-const FAIL_WRITE_OPEN: usize = 2;
-const FAIL_WRITE_WRITE: usize = 3;
-const FAIL_WRITE_PERMS: usize = 4;
-const FAIL_WRITE_SYNC: usize = 5;
-const FAIL_WRITE_RENAME: usize = 6;
+pub(crate) const FAIL_SET_PERMISSIONS: usize = 1;
+pub(crate) const FAIL_WRITE_OPEN: usize = 2;
+pub(crate) const FAIL_WRITE_WRITE: usize = 3;
+pub(crate) const FAIL_WRITE_PERMS: usize = 4;
+pub(crate) const FAIL_WRITE_SYNC: usize = 5;
+pub(crate) const FAIL_WRITE_RENAME: usize = 6;
 
 #[cfg(test)]
 thread_local! {
     static FAILPOINT: Cell<usize> = const { Cell::new(0) };
+    static FAILPOINT_REMAINING: Cell<usize> = const { Cell::new(0) };
 }
-#[cfg(test)]
-static FAILPOINT_LOCK: Mutex<()> = Mutex::new(());
-
 #[cfg(test)]
 fn maybe_fail(step: usize) -> std::io::Result<()> {
     if FAILPOINT.with(|failpoint| failpoint.get()) == step {
+        let remaining = FAILPOINT_REMAINING.with(|remaining| remaining.get());
+        if remaining > 0 {
+            FAILPOINT_REMAINING.with(|remaining| remaining.set(remaining.get() - 1));
+            return Ok(());
+        }
         return Err(std::io::Error::other("failpoint"));
     }
     Ok(())
@@ -98,11 +99,44 @@ fn maybe_fail(_step: usize) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+pub(crate) struct FailpointGuard {
+    previous_step: usize,
+    previous_remaining: usize,
+}
+
+#[cfg(test)]
+impl FailpointGuard {
+    pub(crate) fn new(step: usize, hit: usize) -> Self {
+        let previous_step = FAILPOINT.with(|failpoint| {
+            let previous = failpoint.get();
+            failpoint.set(step);
+            previous
+        });
+        let previous_remaining = FAILPOINT_REMAINING.with(|remaining| {
+            let previous = remaining.get();
+            remaining.set(hit.saturating_sub(1));
+            previous
+        });
+        Self {
+            previous_step,
+            previous_remaining,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for FailpointGuard {
+    fn drop(&mut self) {
+        FAILPOINT.with(|failpoint| failpoint.set(self.previous_step));
+        FAILPOINT_REMAINING.with(|remaining| remaining.set(self.previous_remaining));
+    }
+}
+
 pub fn resolve_paths() -> Result<Paths, String> {
-    let codex_dir = resolve_codex_dir_with(
-        env::var_os("CODEX_HOME").map(PathBuf::from),
-        resolve_home_dir(),
-    )?;
+    let codex_home = env::var_os("CODEX_HOME").map(PathBuf::from);
+    let home = resolve_home_dir();
+    let codex_dir = resolve_codex_dir_with(codex_home, home)?;
     let auth = codex_dir.join("auth.json");
     let profiles = codex_dir.join("profiles");
     let profiles_index = profiles.join("profiles.json");
@@ -128,12 +162,15 @@ fn resolve_codex_dir_with(
         if !metadata.is_dir() {
             return Err(format!("CODEX_HOME {} is not a directory", path.display()));
         }
-        return path
-            .canonicalize()
-            .map_err(|err| format!("Cannot canonicalize CODEX_HOME {}: {err}", path.display()));
+        return canonicalize_codex_dir(&path);
     }
     home.map(|path| path.join(".codex"))
         .ok_or_else(|| COMMON_ERR_RESOLVE_HOME.to_string())
+}
+
+fn canonicalize_codex_dir(path: &Path) -> Result<PathBuf, String> {
+    path.canonicalize()
+        .map_err(|err| format!("Cannot canonicalize CODEX_HOME {}: {err}", path.display()))
 }
 
 /// Read only a root-level string setting. Never include configuration contents
@@ -297,6 +334,16 @@ pub fn write_atomic_private(path: &Path, contents: &[u8]) -> Result<(), String> 
     }
 }
 
+struct PendingAtomicWrite(PathBuf);
+
+impl Drop for PendingAtomicWrite {
+    fn drop(&mut self) {
+        // After a successful rename the temporary path no longer exists.
+        // On any earlier failure, remove the partial credential file.
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
 fn write_atomic_with_permissions(
     path: &Path,
     contents: &[u8],
@@ -305,10 +352,10 @@ fn write_atomic_with_permissions(
     let parent = path
         .parent()
         .ok_or_else(|| crate::msg1(COMMON_ERR_RESOLVE_PARENT, path.display()))?;
-    if !parent.as_os_str().is_empty() {
-        fs::create_dir_all(parent)
-            .map_err(|err| crate::msg2(COMMON_ERR_CREATE_DIR, parent.display(), err))?;
-    }
+    let _ = (!parent.as_os_str().is_empty())
+        .then(|| fs::create_dir_all(parent))
+        .transpose()
+        .map_err(|err| crate::msg2(COMMON_ERR_CREATE_DIR, parent.display(), err))?;
 
     let file_name = path
         .file_name()
@@ -317,10 +364,7 @@ fn write_atomic_with_permissions(
     let pid = std::process::id();
     let mut attempt = 0u32;
     loop {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|err| crate::msg1(COMMON_ERR_GET_TIME, err))?
-            .as_nanos();
+        let nanos = temporary_file_timestamp(SystemTime::now())?;
         let tmp_name = format!(".{file_name}.tmp-{pid}-{nanos}-{attempt}");
         let tmp_path = parent.join(tmp_name);
         let mut options = OpenOptions::new();
@@ -330,10 +374,7 @@ fn write_atomic_with_permissions(
             use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
             options.mode(permissions.mode());
         }
-        let mut tmp_file = match options.open(&tmp_path).and_then(|file| {
-            maybe_fail(FAIL_WRITE_OPEN)?;
-            Ok(file)
-        }) {
+        let file = match options.open(&tmp_path) {
             Ok(file) => file,
             Err(err) => {
                 attempt += 1;
@@ -343,6 +384,12 @@ fn write_atomic_with_permissions(
                 return Err(crate::msg2(COMMON_ERR_CREATE_TEMP, path.display(), err));
             }
         };
+        // This declaration order closes the handle before cleanup on errors.
+        // The success path explicitly closes it before renaming below.
+        let _pending = PendingAtomicWrite(tmp_path.clone());
+        let mut tmp_file = file;
+        maybe_fail(FAIL_WRITE_OPEN)
+            .map_err(|err| crate::msg2(COMMON_ERR_CREATE_TEMP, path.display(), err))?;
 
         maybe_fail(FAIL_WRITE_WRITE)
             .and_then(|_| tmp_file.write_all(contents))
@@ -357,34 +404,38 @@ fn write_atomic_with_permissions(
         maybe_fail(FAIL_WRITE_SYNC)
             .and_then(|_| tmp_file.sync_all())
             .map_err(|err| crate::msg2(COMMON_ERR_WRITE_TEMP, path.display(), err))?;
+        drop(tmp_file);
 
         let rename_result = maybe_fail(FAIL_WRITE_RENAME).and_then(|_| fs::rename(&tmp_path, path));
         match rename_result {
             Ok(()) => return Ok(()),
             Err(err) => {
-                #[cfg(windows)]
-                {
-                    if path.exists() {
-                        let _ = fs::remove_file(path);
-                    }
-                    if maybe_fail(FAIL_WRITE_RENAME)
-                        .and_then(|_| fs::rename(&tmp_path, path))
-                        .is_ok()
-                    {
-                        return Ok(());
-                    }
-                }
-                let _ = fs::remove_file(&tmp_path);
+                // std::fs::rename replaces an existing file on supported
+                // platforms. Never delete the destination after a failed
+                // replacement: it may be the only valid auth cache.
                 return Err(crate::msg2(COMMON_ERR_REPLACE_FILE, path.display(), err));
             }
         }
     }
 }
 
+fn temporary_file_timestamp(now: SystemTime) -> Result<u128, String> {
+    now.duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .map_err(|err| crate::msg1(COMMON_ERR_GET_TIME, err))
+}
+
 pub fn copy_atomic(source: &Path, dest: &Path) -> Result<(), String> {
     let permissions = fs::metadata(source)
         .map_err(|err| crate::msg2(COMMON_ERR_READ_METADATA, source.display(), err))?
         .permissions();
+    #[cfg(unix)]
+    let permissions = {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = permissions;
+        permissions.set_mode(0o600);
+        permissions
+    };
     let contents =
         fs::read(source).map_err(|err| crate::msg2(COMMON_ERR_READ_FILE, source.display(), err))?;
     write_atomic_with_permissions(dest, &contents, Some(permissions))
@@ -681,31 +732,19 @@ fn set_profile_permissions(path: &Path, perms: fs::Permissions) -> std::io::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{make_paths, spawn_server};
+    use crate::test_utils::{ENV_MUTEX, make_paths, set_env_guard, spawn_server};
     use std::ffi::OsString;
     use std::fs;
     use ureq::Agent;
 
     fn with_failpoint<F: FnOnce()>(step: usize, f: F) {
-        let _guard = FAILPOINT_LOCK.lock().unwrap();
-        let prev = FAILPOINT.with(|failpoint| {
-            let prev = failpoint.get();
-            failpoint.set(step);
-            prev
-        });
+        let _guard = FailpointGuard::new(step, 1);
         f();
-        FAILPOINT.with(|failpoint| failpoint.set(prev));
     }
 
     fn with_failpoint_disabled<F: FnOnce()>(f: F) {
-        let _guard = FAILPOINT_LOCK.lock().unwrap();
-        let prev = FAILPOINT.with(|failpoint| {
-            let prev = failpoint.get();
-            failpoint.set(0);
-            prev
-        });
+        let _guard = FailpointGuard::new(0, 1);
         f();
-        FAILPOINT.with(|failpoint| failpoint.set(prev));
     }
 
     fn http_response(status: &str, headers: &[(&str, &str)], body: &str) -> String {
@@ -787,6 +826,11 @@ mod tests {
                 .unwrap_err()
                 .contains("not a directory")
         );
+        assert!(
+            canonicalize_codex_dir(&dir.path().join("missing"))
+                .unwrap_err()
+                .contains("Cannot canonicalize CODEX_HOME")
+        );
     }
 
     #[test]
@@ -810,6 +854,29 @@ mod tests {
             let error = read_config_string(&path, &["setting"]).unwrap_err();
             assert!(!error.contains("private-secret-value"));
         }
+    }
+
+    #[test]
+    fn config_reader_reports_unreadable_configuration_without_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::create_dir(&path).unwrap();
+
+        let error = read_config_string(&path, &["secret"]).unwrap_err();
+        assert!(error.contains("Cannot read configuration"));
+        assert!(!error.contains("secret"));
+    }
+
+    #[test]
+    fn resolve_paths_uses_configured_codex_home() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let _env = set_env_guard("CODEX_HOME", Some(dir.path().to_str().unwrap()));
+
+        let paths = resolve_paths().unwrap();
+        assert_eq!(paths.codex, dir.path().canonicalize().unwrap());
+        assert_eq!(paths.auth, paths.codex.join("auth.json"));
+        assert_eq!(paths.profiles, paths.codex.join("profiles"));
     }
 
     #[test]
@@ -855,6 +922,19 @@ mod tests {
     }
 
     #[test]
+    fn resolve_home_dir_joins_drive_and_homepath_when_other_sources_missing() {
+        let out = resolve_home_dir_with(
+            None,
+            None,
+            None,
+            None,
+            Some(PathBuf::from("drive")),
+            Some(PathBuf::from("home")),
+        );
+        assert_eq!(out, Some(PathBuf::from("drive/home")));
+    }
+
+    #[test]
     fn unexpected_http_error_plain_message_formats_multiline_for_unknown_body() {
         let err = UnexpectedHttpError {
             status: 402,
@@ -877,6 +957,7 @@ mod tests {
                 "Request ID: req-123"
             )
         );
+        assert!(err.to_string().contains(", cf-ray: ray-123"));
     }
 
     #[test]
@@ -978,6 +1059,81 @@ mod tests {
             err.plain_message(),
             "Workspace deactivated by owner\nunexpected status 402 Payment Required"
         );
+    }
+
+    #[test]
+    fn unexpected_http_error_uses_error_message_for_display() {
+        let err = UnexpectedHttpError {
+            status: 400,
+            status_text: Some("Bad Request".to_string()),
+            body: r#"{"error":{"message":"invalid request"}}"#.to_string(),
+            url: None,
+            cf_ray: None,
+            request_id: None,
+            identity_authorization_error: None,
+            identity_error_code: None,
+        };
+
+        assert_eq!(
+            err.to_string(),
+            "unexpected status 400 Bad Request: invalid request"
+        );
+        assert!(err.plain_message().starts_with("invalid request\n"));
+    }
+
+    #[test]
+    fn unexpected_http_error_handles_unknown_status_and_empty_error_message() {
+        let err = UnexpectedHttpError {
+            status: 599,
+            status_text: None,
+            body: r#"{"error":{"message":"   "}}"#.to_string(),
+            url: None,
+            cf_ray: None,
+            request_id: None,
+            identity_authorization_error: None,
+            identity_error_code: None,
+        };
+
+        let plain = err.plain_message();
+        assert!(plain.starts_with(r#"{"error":{"message":"   "}}"#));
+        assert!(plain.contains("unexpected status 599"));
+    }
+
+    #[test]
+    fn unexpected_http_error_plain_message_includes_auth_debug_context() {
+        let err = UnexpectedHttpError {
+            status: 401,
+            status_text: Some("Unauthorized".to_string()),
+            body: "unauthorized".to_string(),
+            url: None,
+            cf_ray: None,
+            request_id: None,
+            identity_authorization_error: Some("expired".to_string()),
+            identity_error_code: Some("session_expired".to_string()),
+        };
+
+        assert_eq!(
+            err.plain_message(),
+            concat!(
+                "unauthorized\n",
+                "unexpected status 401 Unauthorized\n",
+                "Auth Error: expired\n",
+                "Auth Error Code: session_expired"
+            )
+        );
+    }
+
+    #[test]
+    fn truncation_preserves_utf8_boundaries() {
+        assert_eq!(truncate_with_ellipsis("éclair", 1), "...");
+        assert_eq!(truncate_with_ellipsis("éclair", 2), "é...");
+    }
+
+    #[test]
+    fn terminal_sanitizer_handles_truncated_and_st_terminated_sequences() {
+        assert_eq!(sanitize_for_terminal("before\u{1b}"), "before");
+        assert_eq!(sanitize_for_terminal("\u{1b}]title\u{1b}\\after"), "after");
+        assert_eq!(sanitize_for_terminal("\u{1b}Xafter"), "after");
     }
 
     #[test]
@@ -1127,6 +1283,13 @@ mod tests {
             let path = dir.path().join("file.txt");
             write_atomic(&path, b"hello").unwrap();
             assert_eq!(fs::read_to_string(&path).unwrap(), "hello");
+            write_atomic(&path, b"replacement").unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), "replacement");
+
+            let nested = dir.path().join("nested").join("file.txt");
+            write_atomic(&nested, b"nested").unwrap();
+            assert_eq!(fs::read_to_string(nested).unwrap(), "nested");
+            assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
         });
     }
 
@@ -1140,6 +1303,29 @@ mod tests {
     fn write_atomic_invalid_filename() {
         let err = write_atomic(Path::new("/"), b"hi").unwrap_err();
         assert!(err.contains("invalid file name") || err.contains("parent directory"));
+        let err = write_atomic_private(Path::new("/"), b"hi").unwrap_err();
+        assert!(err.contains("invalid file name") || err.contains("parent directory"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_rejects_non_utf8_filename() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(OsString::from_vec(vec![0xff]));
+        let error = write_atomic(&path, b"credentials").unwrap_err();
+        assert!(error.contains("Invalid file name"));
+    }
+
+    #[test]
+    fn temporary_file_timestamp_rejects_a_pre_epoch_clock() {
+        let before_epoch = UNIX_EPOCH
+            .checked_sub(std::time::Duration::from_secs(1))
+            .unwrap();
+        let err = temporary_file_timestamp(before_epoch).unwrap_err();
+        assert!(err.contains("temporary file timestamp"));
     }
 
     #[test]
@@ -1160,6 +1346,28 @@ mod tests {
             let err = write_atomic(&path, b"data").unwrap_err();
             assert!(err.contains("Failed to create temp file"));
         });
+    }
+
+    #[test]
+    fn failpoint_guard_can_target_a_later_write_and_restores_after_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        {
+            let _guard = FailpointGuard::new(FAIL_WRITE_WRITE, 2);
+            write_atomic(&path, b"first").unwrap();
+            assert!(write_atomic(&path, b"second").is_err());
+        }
+        write_atomic(&path, b"after").unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), "after");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_reports_repeated_temp_open_failure() {
+        // procfs is intentionally not writable. The path is never modified;
+        // this exercises the bounded retry path for create_new failures.
+        let err = write_atomic(Path::new("/proc/self/status"), b"data").unwrap_err();
+        assert!(err.contains("Failed to create temp file"));
     }
 
     #[test]
@@ -1218,6 +1426,57 @@ mod tests {
     }
 
     #[test]
+    fn failed_atomic_writes_preserve_original_and_remove_temporary_credentials() {
+        for step in [
+            FAIL_WRITE_OPEN,
+            FAIL_WRITE_WRITE,
+            FAIL_WRITE_PERMS,
+            FAIL_WRITE_SYNC,
+            FAIL_WRITE_RENAME,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("auth.json");
+            fs::write(&path, b"original credentials").unwrap();
+            with_failpoint(step, || {
+                assert!(write_atomic(&path, b"replacement credentials").is_err());
+            });
+            assert_eq!(fs::read(&path).unwrap(), b"original credentials");
+            let paths: Vec<_> = fs::read_dir(dir.path())
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect();
+            assert_eq!(
+                paths,
+                vec![path],
+                "temporary credentials left after step {step}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copying_credentials_tightens_permissions_before_publishing() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.json");
+        let target = dir.path().join("auth.json");
+        fs::write(&source, b"synthetic credentials").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o644)).unwrap();
+        copy_atomic(&source, &target).unwrap();
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // Failure to set private permissions must leave the old destination in place.
+        fs::write(&source, b"replacement credentials").unwrap();
+        with_failpoint(FAIL_WRITE_PERMS, || {
+            assert!(copy_atomic(&source, &target).is_err());
+        });
+        assert_eq!(fs::read(&target).unwrap(), b"synthetic credentials");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
     fn copy_atomic_reads_source() {
         with_failpoint_disabled(|| {
             let dir = tempfile::tempdir().expect("tempdir");
@@ -1227,6 +1486,16 @@ mod tests {
             copy_atomic(&source, &dest).unwrap();
             assert_eq!(fs::read_to_string(&dest).unwrap(), "copy");
         });
+    }
+
+    #[test]
+    fn copy_atomic_reports_source_read_failure_after_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source-directory");
+        let dest = dir.path().join("dest.txt");
+        fs::create_dir(&source).unwrap();
+        let err = copy_atomic(&source, &dest).unwrap_err();
+        assert!(err.contains("Failed to read"));
     }
 
     #[test]

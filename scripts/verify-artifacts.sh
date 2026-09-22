@@ -15,6 +15,14 @@ fi
 
 version="${version#v}"
 
+required_targets=(
+  aarch64-apple-darwin
+  aarch64-unknown-linux-gnu
+  x86_64-apple-darwin
+  x86_64-pc-windows-msvc
+  x86_64-unknown-linux-gnu
+)
+
 release_dir="${out_dir}/release"
 npm_packages_dir="${out_dir}/npm-packages"
 homebrew_dir="${out_dir}/homebrew"
@@ -42,10 +50,12 @@ if [[ ! -f "${checksums_file}" ]]; then
   exit 1
 fi
 
-has_release_assets=0
-shopt -s nullglob
-for artifact_dir in "${out_dir}/artifacts"/codex-profiles-*; do
-  target="${artifact_dir##*/codex-profiles-}"
+for target in "${required_targets[@]}"; do
+  artifact_dir="${out_dir}/artifacts/codex-profiles-${target}"
+  if [[ ! -d "${artifact_dir}" ]]; then
+    echo "Missing build artifact directory: ${artifact_dir}" >&2
+    exit 1
+  fi
   if [[ "${target}" == *windows* ]]; then
     expected="${release_dir}/codex-profiles-${target}.exe.zip"
   else
@@ -55,14 +65,21 @@ for artifact_dir in "${out_dir}/artifacts"/codex-profiles-*; do
     echo "Missing release asset: ${expected}" >&2
     exit 1
   fi
-  has_release_assets=1
+done
+
+shopt -s nullglob
+for artifact_dir in "${out_dir}/artifacts"/codex-profiles-*; do
+  target="${artifact_dir##*/codex-profiles-}"
+  known=0
+  for required_target in "${required_targets[@]}"; do
+    [[ "${target}" == "${required_target}" ]] && known=1
+  done
+  if [[ "${known}" -eq 0 ]]; then
+    echo "Unsupported build artifact target: ${target}" >&2
+    exit 1
+  fi
 done
 shopt -u nullglob
-
-if [[ "${has_release_assets}" -eq 0 ]]; then
-  echo "No build artifacts found under ${out_dir}/artifacts" >&2
-  exit 1
-fi
 
 main_pkg="${npm_packages_dir}/codex-profiles-${version}.tgz"
 if [[ ! -f "${main_pkg}" ]]; then
@@ -76,12 +93,22 @@ if [[ ! -f "${crate}" ]]; then
   exit 1
 fi
 
-if [[ -f "${release_dir}/codex-profiles-aarch64-apple-darwin.tar.gz" || \
-      -f "${release_dir}/codex-profiles-x86_64-apple-darwin.tar.gz" ]]; then
-  if [[ ! -f "${homebrew_dir}/codex-profiles.rb" ]]; then
-    echo "Missing Homebrew cask: ${homebrew_dir}/codex-profiles.rb" >&2
+for package_name in \
+  codex-profiles-darwin-arm64 \
+  codex-profiles-darwin-x64 \
+  codex-profiles-linux-arm64 \
+  codex-profiles-linux-x64 \
+  codex-profiles-win32-x64; do
+  package_path="${npm_packages_dir}/${package_name}-${version}.tgz"
+  if [[ ! -f "${package_path}" ]]; then
+    echo "Missing npm platform package: ${package_path}" >&2
     exit 1
   fi
+done
+
+if [[ ! -f "${homebrew_dir}/codex-profiles.rb" ]]; then
+  echo "Missing Homebrew cask: ${homebrew_dir}/codex-profiles.rb" >&2
+  exit 1
 fi
 
 if [[ ! -s "${checksums_file}" ]]; then
@@ -93,6 +120,106 @@ if [[ ! -f "${manifest_file}" ]]; then
   echo "Missing release manifest: ${manifest_file}" >&2
   exit 1
 fi
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    echo "Missing sha256sum/shasum" >&2
+    exit 1
+  fi
+}
+
+# Resolve each checksum entry to a generated artifact and independently hash
+# that file. Comparing only SHA256SUMS with the manifest would let a corrupted
+# artifact pass verification when both metadata files still agree.
+while read -r expected path; do
+  [[ -n "${expected}" && -n "${path}" ]] || continue
+  if [[ "${path}" == */* || "${path}" == .* ]]; then
+    echo "Checksum entry must name an artifact basename: ${path}" >&2
+    exit 1
+  fi
+  artifact=""
+  for directory in "${release_dir}" "${npm_packages_dir}" "${cargo_dir}" "${homebrew_dir}"; do
+    candidate="${directory}/${path}"
+    if [[ -f "${candidate}" ]]; then
+      if [[ -n "${artifact}" ]]; then
+        echo "Ambiguous checksum artifact path: ${path}" >&2
+        exit 1
+      fi
+      artifact="${candidate}"
+    fi
+  done
+  if [[ -z "${artifact}" ]]; then
+    echo "Checksum entry has no matching artifact: ${path}" >&2
+    exit 1
+  fi
+  actual="$(sha256_file "${artifact}")"
+  if [[ "${expected}" != "${actual}" ]]; then
+    echo "Checksum mismatch for ${path}: expected ${expected}, got ${actual}" >&2
+    exit 1
+  fi
+done < "${checksums_file}"
+
+for directory in "${release_dir}" "${npm_packages_dir}" "${cargo_dir}" "${homebrew_dir}"; do
+  for artifact in "${directory}"/*; do
+    [[ -f "${artifact}" ]] || continue
+    path="$(basename "${artifact}")"
+    count="$(awk -v name="${path}" '$2 == name { count += 1 } END { print count + 0 }' "${checksums_file}")"
+    if [[ "${count}" -ne 1 ]]; then
+      echo "Generated artifact is missing or duplicated in checksums: ${path}" >&2
+      exit 1
+    fi
+  done
+done
+
+# Validate exact archive contents, regular-file types, and executable mode in
+# Unix release archives. The release smoke test runs before upload/download, so
+# this also catches mode-bit loss in GitHub artifact transport.
+python3 - <<'PY' "${release_dir}"
+import sys
+import tarfile
+import zipfile
+from pathlib import Path
+
+release_dir = Path(sys.argv[1])
+required_targets = {
+    "aarch64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+}
+for target in required_targets:
+    archive = release_dir / f"codex-profiles-{target}.tar.gz"
+    try:
+        with tarfile.open(archive, "r:gz") as handle:
+            members = handle.getmembers()
+    except (OSError, tarfile.TarError) as error:
+        raise SystemExit(f"Invalid release archive: {archive}: {error}")
+    if len(members) != 1 or members[0].name != "codex-profiles":
+        raise SystemExit(f"Release archive must contain only codex-profiles: {archive}")
+    member = members[0]
+    if not member.isfile():
+        raise SystemExit(f"Release archive member is not a regular file: {archive}")
+    if not member.mode & 0o100:
+        raise SystemExit(f"Release archive binary is not executable: {archive}")
+
+archive = release_dir / "codex-profiles-x86_64-pc-windows-msvc.exe.zip"
+try:
+    with zipfile.ZipFile(archive) as handle:
+        members = handle.infolist()
+except (OSError, zipfile.BadZipFile) as error:
+    raise SystemExit(f"Invalid release archive: {archive}: {error}")
+if len(members) != 1 or members[0].filename != "codex-profiles.exe" or members[0].is_dir():
+    raise SystemExit(f"Release archive must contain only codex-profiles.exe: {archive}")
+member = members[0]
+unix_mode = (member.external_attr >> 16) & 0xffff
+file_type = unix_mode & 0o170000
+if file_type not in (0, 0o100000):
+    raise SystemExit(f"Release archive member is not a regular file: {archive}")
+PY
 
 python3 - <<'PY' "${version}" "${checksums_file}" "${manifest_file}"
 import json
@@ -151,6 +278,8 @@ for artifact in artifacts:
     sha256 = artifact.get("sha256")
     if not path or not sha256:
         raise SystemExit("Manifest artifact entries must include path and sha256")
+    if path in observed:
+        raise SystemExit(f"Manifest contains duplicate artifact path: {path}")
     observed[path] = sha256
 
 if observed != expected:

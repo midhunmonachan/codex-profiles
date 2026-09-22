@@ -1,7 +1,7 @@
 .PHONY: coverage fmt clippy test check precommit hooks release-tag release-prep env-check clean-artifacts verify-artifacts print-release-notes
 
 coverage:
-	cargo llvm-cov --workspace --all-features --fail-under-lines 90 --ignore-filename-regex "tests/|target/"
+	cargo llvm-cov --locked --workspace --all-features --fail-under-lines 100 --ignore-filename-regex "tests/|target/"
 
 fmt:
 	cargo fmt --all

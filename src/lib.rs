@@ -1,4 +1,5 @@
 use clap::{FromArgMatches, error::ErrorKind};
+use std::io::{self, Write};
 use std::process::Command as ProcessCommand;
 
 use crate::cli::{Cli, Commands, command_with_examples};
@@ -30,12 +31,13 @@ fn run_cli_with_args(args: Vec<std::ffi::OsString>) -> Result<(), String> {
                 return Ok(());
             }
             if err.kind() == ErrorKind::DisplayVersion {
-                return err.print().map_err(|err| err.to_string());
+                return write_version_error(&err);
             }
             return Err(err.to_string());
         }
     };
-    let cli = Cli::from_arg_matches(&matches).map_err(|err| err.to_string())?;
+    let cli = Cli::from_arg_matches(&matches)
+        .expect("validated clap matches must convert to the derived CLI type");
     set_plain(cli.plain);
     if let Err(message) = run(cli) {
         if message == CANCELLED_MESSAGE {
@@ -48,6 +50,17 @@ fn run_cli_with_args(args: Vec<std::ffi::OsString>) -> Result<(), String> {
     Ok(())
 }
 
+fn write_version_error(err: &clap::error::Error) -> Result<(), String> {
+    let mut stdout = io::stdout().lock();
+    write_version_error_to(err, &mut stdout)
+}
+
+fn write_version_error_to(err: &clap::error::Error, writer: &mut dyn Write) -> Result<(), String> {
+    write!(writer, "{}", err.render())
+        .and_then(|_| writer.flush())
+        .map_err(|error| format!("Could not write version response: {error}"))
+}
+
 fn print_version_header() {
     let name = package_command_name();
     println!("{name} {}", env!("CARGO_PKG_VERSION"));
@@ -58,19 +71,28 @@ fn run(cli: Cli) -> Result<(), String> {
     let paths = resolve_paths()?;
     let json = cli.json;
     let is_doctor = matches!(&cli.command, Commands::Doctor { .. });
-    if !is_doctor {
+    let update_outcome = if is_doctor {
+        None
+    } else {
         ensure_paths(&paths)?;
         let check_for_update_on_startup = std::env::var_os("CODEX_PROFILES_SKIP_UPDATE").is_none();
         let update_config = UpdateConfig {
             codex_home: paths.codex.clone(),
             check_for_update_on_startup,
         };
-        match run_update_prompt_if_needed(&update_config)? {
-            UpdatePromptOutcome::Continue => {}
-            UpdatePromptOutcome::RunUpdate(action) => {
-                return run_update_action(action);
-            }
-        }
+        Some(run_update_prompt_if_needed(&update_config)?)
+    };
+    run_with_update_outcome(cli, paths, json, update_outcome)
+}
+
+fn run_with_update_outcome(
+    cli: Cli,
+    paths: Paths,
+    json: bool,
+    update_outcome: Option<UpdatePromptOutcome>,
+) -> Result<(), String> {
+    if let Some(UpdatePromptOutcome::RunUpdate(action)) = update_outcome {
+        return run_update_action(action);
     }
 
     match cli.command {
@@ -104,7 +126,12 @@ fn run(cli: Cli) -> Result<(), String> {
                 rename_profile_label(&paths, label, to, json)
             }
         },
-        Commands::Status { all, label, id } => status_profiles(&paths, all, label, id, json),
+        Commands::Status {
+            all,
+            compact,
+            label,
+            id,
+        } => status_profiles(&paths, all, compact, label, id, json),
         Commands::Delete { yes, label, id } => delete_profile(&paths, yes, label, id, json),
     }
 }
@@ -184,6 +211,81 @@ mod tests {
     }
 
     #[test]
+    fn run_cli_with_args_display_version() {
+        let args = vec![
+            OsString::from("codex-profiles"),
+            OsString::from("--version"),
+        ];
+        run_cli_with_args(args).unwrap();
+    }
+
+    #[test]
+    fn display_version_write_errors_are_returned() {
+        let err = command_with_examples()
+            .try_get_matches_from(["codex-profiles", "--version"])
+            .unwrap_err();
+        let mut writer = FailingWriter {
+            fail_write: true,
+            fail_flush: false,
+            output: Vec::new(),
+        };
+        let message = write_version_error_to(&err, &mut writer).unwrap_err();
+        assert!(message.contains("Could not write version response"));
+    }
+
+    #[test]
+    fn display_version_flush_errors_are_returned() {
+        let err = command_with_examples()
+            .try_get_matches_from(["codex-profiles", "--version"])
+            .unwrap_err();
+        let mut writer = FailingWriter {
+            fail_write: false,
+            fail_flush: true,
+            output: Vec::new(),
+        };
+        let message = write_version_error_to(&err, &mut writer).unwrap_err();
+        assert!(message.contains("Could not write version response"));
+    }
+
+    #[test]
+    fn display_version_output_is_rendered_before_flush() {
+        let err = command_with_examples()
+            .try_get_matches_from(["codex-profiles", "--version"])
+            .unwrap_err();
+        let expected = err.render().to_string();
+        let mut writer = FailingWriter {
+            fail_write: false,
+            fail_flush: false,
+            output: Vec::new(),
+        };
+        write_version_error_to(&err, &mut writer).unwrap();
+        assert_eq!(String::from_utf8(writer.output).unwrap(), expected);
+    }
+
+    struct FailingWriter {
+        fail_write: bool,
+        fail_flush: bool,
+        output: Vec<u8>,
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+            if self.fail_write {
+                return Err(io::Error::other("synthetic writer failure"));
+            }
+            self.output.extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            if self.fail_flush {
+                return Err(io::Error::other("synthetic flush failure"));
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
     fn run_cli_with_args_errors() {
         let args = vec![OsString::from("codex-profiles"), OsString::from("nope")];
         let err = run_cli_with_args(args).unwrap_err();
@@ -205,6 +307,25 @@ mod tests {
         {
             let _env = set_env_guard("PATH", Some(&path));
             run_update_action(UpdateAction::NpmGlobalLatest).unwrap();
+            run_with_update_outcome(
+                Cli {
+                    plain: true,
+                    json: false,
+                    command: Commands::List { show_id: false },
+                },
+                make_paths(dir.path()),
+                false,
+                Some(UpdatePromptOutcome::RunUpdate(
+                    UpdateAction::NpmGlobalLatest,
+                )),
+            )
+            .unwrap();
+        }
+        fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
+        {
+            let _env = set_env_guard("PATH", Some(&path));
+            let err = run_update_action(UpdateAction::NpmGlobalLatest).unwrap_err();
+            assert!(err.contains("Update command failed"));
         }
         {
             let _env = set_env_guard("PATH", Some(""));
@@ -229,5 +350,145 @@ mod tests {
             command: Commands::List { show_id: false },
         };
         run(cli).unwrap();
+    }
+
+    #[test]
+    fn run_dispatches_every_normal_command_route() {
+        let _guard = crate::test_utils::ENV_MUTEX.lock().unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_paths(dir.path());
+        ensure_paths(&paths).unwrap();
+        fs::write(&paths.auth, r#"{"OPENAI_API_KEY":"sk-dispatch-test"}"#).unwrap();
+
+        let dispatch = |command| {
+            run_with_update_outcome(
+                Cli {
+                    plain: true,
+                    json: true,
+                    command,
+                },
+                make_paths(dir.path()),
+                true,
+                None,
+            )
+        };
+
+        dispatch(Commands::Save {
+            label: Some("work".to_string()),
+        })
+        .unwrap();
+        dispatch(Commands::List { show_id: true }).unwrap();
+        dispatch(Commands::Status {
+            all: false,
+            compact: false,
+            label: None,
+            id: None,
+        })
+        .unwrap();
+
+        let export_path = dir.path().join("profiles.json");
+        dispatch(Commands::Export {
+            label: Some("work".to_string()),
+            id: Vec::new(),
+            output: export_path.clone(),
+        })
+        .unwrap();
+
+        dispatch(Commands::Load {
+            label: Some("work".to_string()),
+            id: None,
+            force: true,
+            with_status: false,
+        })
+        .unwrap();
+
+        let index: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&paths.profiles_index).unwrap()).unwrap();
+        let id = index["profiles"]
+            .as_object()
+            .and_then(|profiles| profiles.keys().next())
+            .expect("saved profile id")
+            .to_string();
+        dispatch(Commands::Label {
+            command: crate::cli::LabelCommands::Set {
+                selector: crate::cli::SavedProfileSelector {
+                    label: None,
+                    id: Some(id.clone()),
+                },
+                to: "team".to_string(),
+            },
+        })
+        .unwrap();
+        dispatch(Commands::Label {
+            command: crate::cli::LabelCommands::Rename {
+                label: "team".to_string(),
+                to: "renamed".to_string(),
+            },
+        })
+        .unwrap();
+        dispatch(Commands::Label {
+            command: crate::cli::LabelCommands::Clear {
+                selector: crate::cli::SavedProfileSelector {
+                    label: None,
+                    id: Some(id.clone()),
+                },
+            },
+        })
+        .unwrap();
+
+        let missing_set_selector = dispatch(Commands::Label {
+            command: crate::cli::LabelCommands::Set {
+                selector: crate::cli::SavedProfileSelector {
+                    label: None,
+                    id: None,
+                },
+                to: "team".to_string(),
+            },
+        })
+        .unwrap_err();
+        assert!(
+            missing_set_selector
+                .contains("exactly one of `--label <label>` or `--id <profile-id>` is required")
+        );
+        assert!(missing_set_selector.contains("Usage:"));
+
+        let missing_clear_selector = dispatch(Commands::Label {
+            command: crate::cli::LabelCommands::Clear {
+                selector: crate::cli::SavedProfileSelector {
+                    label: None,
+                    id: None,
+                },
+            },
+        })
+        .unwrap_err();
+        assert!(
+            missing_clear_selector
+                .contains("exactly one of `--label <label>` or `--id <profile-id>` is required")
+        );
+        assert!(missing_clear_selector.contains("Usage:"));
+
+        dispatch(Commands::Doctor { fix: false }).unwrap();
+
+        let imported_dir = tempfile::tempdir().expect("import tempdir");
+        let imported_paths = make_paths(imported_dir.path());
+        ensure_paths(&imported_paths).unwrap();
+        run_with_update_outcome(
+            Cli {
+                plain: true,
+                json: true,
+                command: Commands::Import { input: export_path },
+            },
+            imported_paths,
+            true,
+            None,
+        )
+        .unwrap();
+
+        dispatch(Commands::Delete {
+            yes: true,
+            label: None,
+            id: vec![id],
+        })
+        .unwrap();
     }
 }

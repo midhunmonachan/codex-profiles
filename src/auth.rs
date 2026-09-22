@@ -13,8 +13,8 @@ use crate::{
     AUTH_ERR_INVALID_TOKENS_OBJECT, AUTH_ERR_MISSING_TOKENS, AUTH_ERR_PROFILE_MISSING_ACCESS_TOKEN,
     AUTH_ERR_PROFILE_MISSING_ACCOUNT, AUTH_ERR_PROFILE_MISSING_EMAIL_PLAN,
     AUTH_ERR_PROFILE_NO_REFRESH_TOKEN, AUTH_ERR_READ, AUTH_ERR_REFRESH_FAILED_OTHER,
-    AUTH_ERR_REFRESH_MISSING_ACCESS_TOKEN, AUTH_ERR_REFRESH_STATE_CHANGED, AUTH_ERR_SERIALIZE_AUTH,
-    AUTH_ERR_UNSUPPORTED_STORE_MODE, AUTH_ERR_WRITE_AUTH, write_atomic,
+    AUTH_ERR_REFRESH_MISSING_ACCESS_TOKEN, AUTH_ERR_REFRESH_STATE_CHANGED,
+    AUTH_ERR_UNSUPPORTED_STORE_MODE, AUTH_ERR_WRITE_AUTH, write_atomic_private,
 };
 
 const API_KEY_PREFIX: &str = "api-key-";
@@ -56,7 +56,7 @@ pub struct AuthFile {
 }
 
 #[serde_as]
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct Tokens {
     #[serde(default)]
     #[serde_as(as = "NoneAsEmptyString")]
@@ -138,10 +138,22 @@ pub fn read_auth_file(path: &Path) -> Result<AuthFile, String> {
     })?;
     let auth: AuthFile = serde_json::from_str(&data)
         .map_err(|err| crate::msg2(AUTH_ERR_INVALID_JSON_RELOGIN, path.display(), err))?;
-    // Match Codex AuthDotJson::resolved_mode without exposing unsupported
-    // credential material through the public AuthFile model.
-    let raw: serde_json::Value = serde_json::from_str(&data)
-        .map_err(|err| crate::msg2(AUTH_ERR_INVALID_JSON_RELOGIN, path.display(), err))?;
+    // Deserializing AuthFile above already proves that this is valid JSON;
+    // parse the same bytes as a value without manufacturing an unreachable
+    // second parse error path.
+    let raw: serde_json::Value =
+        serde_json::from_str(&data).expect("AuthFile deserialization validates JSON");
+    resolve_auth_file_mode(&raw, auth)
+}
+
+/// Resolve credentials with the same precedence as Codex's
+/// `AuthDotJson::resolved_mode`. The public `AuthFile` model intentionally
+/// omits credential fields owned by external stores, so callers that accept
+/// in-memory JSON must pass the raw value through this resolver too.
+pub(crate) fn resolve_auth_file_mode(
+    raw: &serde_json::Value,
+    auth: AuthFile,
+) -> Result<AuthFile, String> {
     let explicit_mode = raw.get("auth_mode").filter(|value| !value.is_null());
     let mode = match explicit_mode {
         Some(value) => value
@@ -285,16 +297,6 @@ pub fn extract_profile_identity(tokens: &Tokens) -> Option<ProfileIdentityKey> {
         workspace_or_org_id,
         plan_type,
     })
-}
-
-fn account_id_from_id_token(id_token: &str) -> Option<String> {
-    let claims = decode_id_token_claims(id_token)?;
-    let workspace = claims
-        .auth
-        .and_then(|auth| auth.chatgpt_account_id)
-        .or(claims.organization_id)
-        .or(claims.project_id)?;
-    normalize_identity_value(&workspace)
 }
 
 fn normalize_identity_value(value: &str) -> Option<String> {
@@ -458,6 +460,8 @@ struct RefreshResponse {
 }
 
 pub fn refresh_profile_tokens(path: &Path, tokens: &mut Tokens) -> Result<(), String> {
+    let initial_contents = std::fs::read_to_string(path)
+        .map_err(|err| crate::msg2(AUTH_ERR_READ, path.display(), err))?;
     let disk_tokens = read_tokens(path)?;
     if !same_refresh_state(&disk_tokens, tokens) {
         if same_profile_refresh_target(&disk_tokens, tokens) {
@@ -473,8 +477,28 @@ pub fn refresh_profile_tokens(path: &Path, tokens: &mut Tokens) -> Result<(), St
         .filter(|value| !value.is_empty())
         .ok_or_else(|| AUTH_ERR_PROFILE_NO_REFRESH_TOKEN.to_string())?;
     let refreshed = refresh_access_token(refresh_token)?;
-    apply_refresh(tokens, &refreshed)?;
-    update_auth_tokens(path, &refreshed)?;
+    validate_refresh_response(&refreshed)?;
+
+    // The request can take long enough for Codex login, load, or another
+    // refresh to replace the file. Re-read before applying the response so a
+    // stale response cannot overwrite a newer account or token rotation.
+    let latest_contents = std::fs::read_to_string(path)
+        .map_err(|err| crate::msg2(AUTH_ERR_READ, path.display(), err))?;
+    let latest_disk_tokens = read_tokens(path)?;
+    if latest_contents != initial_contents {
+        if same_auth_document_context(&initial_contents, &latest_contents)
+            && same_profile_refresh_target(&latest_disk_tokens, tokens)
+        {
+            *tokens = latest_disk_tokens;
+            return Ok(());
+        }
+        return Err(AUTH_ERR_REFRESH_STATE_CHANGED.to_string());
+    }
+
+    let mut next_tokens = latest_disk_tokens.clone();
+    apply_refresh(&mut next_tokens, &refreshed)?;
+    update_auth_tokens(path, &latest_contents, &refreshed)?;
+    *tokens = next_tokens;
     Ok(())
 }
 
@@ -483,6 +507,18 @@ fn same_refresh_state(left: &Tokens, right: &Tokens) -> bool {
         && left.id_token == right.id_token
         && left.access_token == right.access_token
         && left.refresh_token == right.refresh_token
+}
+
+fn same_auth_document_context(left: &str, right: &str) -> bool {
+    fn without_tokens_and_refresh(value: &str) -> Option<serde_json::Value> {
+        let mut value = serde_json::from_str::<serde_json::Value>(value).ok()?;
+        let object = value.as_object_mut()?;
+        object.remove("tokens");
+        object.remove("last_refresh");
+        Some(value)
+    }
+
+    without_tokens_and_refresh(left) == without_tokens_and_refresh(right)
 }
 
 fn same_profile_refresh_target(left: &Tokens, right: &Tokens) -> bool {
@@ -503,16 +539,17 @@ fn read_auth_store_mode_for_path(path: &Path) -> Result<AuthStoreMode, String> {
     if path.file_name().and_then(|name| name.to_str()) != Some("auth.json") {
         return Ok(AuthStoreMode::File);
     }
-    let Some(config_path) = path.parent().map(|dir| dir.join("config.toml")) else {
-        return Ok(AuthStoreMode::File);
-    };
-    if let Some(value) = crate::common::read_config_string(
-        &config_path,
-        &[
-            "cli_auth_credentials_store",
-            "cli_auth_credentials_store_mode",
-        ],
-    )? {
+    // A path whose filename is `auth.json` normally has a parent (`Path`
+    // represents a bare filename with an empty parent). Keep the empty-parent
+    // fallback defensive and total without a branch that cannot be reached by
+    // a valid path containing this filename.
+    let config_path = path.parent().unwrap_or(Path::new("")).join("config.toml");
+    let config_keys = [
+        "cli_auth_credentials_store",
+        "cli_auth_credentials_store_mode",
+    ];
+    let configured_store = crate::common::read_config_string(&config_path, &config_keys)?;
+    if let Some(value) = configured_store {
         return parse_auth_store_mode(&value);
     }
     Ok(AuthStoreMode::File)
@@ -563,27 +600,75 @@ fn refresh_access_token(refresh_token: &str) -> Result<RefreshResponse, String> 
 }
 
 fn apply_refresh(tokens: &mut Tokens, refreshed: &RefreshResponse) -> Result<(), String> {
-    let Some(access_token) = refreshed.access_token.as_ref() else {
+    let Some(access_token) = refreshed
+        .access_token
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    else {
         return Err(AUTH_ERR_REFRESH_MISSING_ACCESS_TOKEN.to_string());
     };
     tokens.access_token = Some(access_token.clone());
-    if let Some(id_token) = refreshed.id_token.as_ref() {
-        tokens.id_token = Some(id_token.clone());
-        if let Some(account_id) = account_id_from_id_token(id_token) {
-            tokens.account_id = Some(account_id);
-        }
+    let refreshed_id_token = refreshed
+        .id_token
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+        .cloned();
+    tokens.id_token = refreshed_id_token
+        .clone()
+        .or_else(|| tokens.id_token.clone());
+    tokens.refresh_token = refreshed
+        .refresh_token
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+        .or_else(|| tokens.refresh_token.clone());
+    Ok(())
+}
+
+fn validate_refresh_response(refreshed: &RefreshResponse) -> Result<(), String> {
+    if refreshed
+        .access_token
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        return Err(crate::msg1(
+            AUTH_ERR_INVALID_REFRESH_RESPONSE,
+            "access_token is empty",
+        ));
     }
-    if let Some(refresh_token) = refreshed.refresh_token.as_ref() {
-        tokens.refresh_token = Some(refresh_token.clone());
+    if refreshed
+        .id_token
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        return Err(crate::msg1(
+            AUTH_ERR_INVALID_REFRESH_RESPONSE,
+            "id_token is empty",
+        ));
+    }
+    if refreshed
+        .refresh_token
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        return Err(crate::msg1(
+            AUTH_ERR_INVALID_REFRESH_RESPONSE,
+            "refresh_token is empty",
+        ));
     }
     Ok(())
 }
 
-fn update_auth_tokens(path: &Path, refreshed: &RefreshResponse) -> Result<(), String> {
+fn update_auth_tokens(
+    path: &Path,
+    expected_contents: &str,
+    refreshed: &RefreshResponse,
+) -> Result<(), String> {
     let contents = std::fs::read_to_string(path)
         .map_err(|err| crate::msg2(AUTH_ERR_READ, path.display(), err))?;
     let mut value: serde_json::Value = serde_json::from_str(&contents)
         .map_err(|err| crate::msg2(AUTH_ERR_INVALID_JSON, path.display(), err))?;
+
     let Some(root) = value.as_object_mut() else {
         return Err(crate::msg1(AUTH_ERR_INVALID_JSON_OBJECT, path.display()));
     };
@@ -593,37 +678,39 @@ fn update_auth_tokens(path: &Path, refreshed: &RefreshResponse) -> Result<(), St
     let Some(tokens_map) = tokens.as_object_mut() else {
         return Err(crate::msg1(AUTH_ERR_INVALID_TOKENS_OBJECT, path.display()));
     };
-    if let Some(id_token) = refreshed.id_token.as_ref() {
+
+    // Keep the final read-modify-write conditional as well as the pre-request
+    // check. Compare the complete document so an auth-mode or provider change
+    // with identical token fields cannot be overwritten by a stale refresh.
+    if contents != expected_contents {
+        return Err(AUTH_ERR_REFRESH_STATE_CHANGED.to_string());
+    }
+
+    let _ = refreshed.id_token.as_ref().inspect(|id_token| {
         tokens_map.insert(
             "id_token".to_string(),
-            serde_json::Value::String(id_token.clone()),
+            serde_json::Value::String((*id_token).clone()),
         );
-        if let Some(account_id) = account_id_from_id_token(id_token) {
-            tokens_map.insert(
-                "account_id".to_string(),
-                serde_json::Value::String(account_id),
-            );
-        }
-    }
-    if let Some(access_token) = refreshed.access_token.as_ref() {
+    });
+    let _ = refreshed.access_token.as_ref().inspect(|access_token| {
         tokens_map.insert(
             "access_token".to_string(),
-            serde_json::Value::String(access_token.clone()),
+            serde_json::Value::String((*access_token).clone()),
         );
-    }
-    if let Some(refresh_token) = refreshed.refresh_token.as_ref() {
+    });
+    let _ = refreshed.refresh_token.as_ref().inspect(|refresh_token| {
         tokens_map.insert(
             "refresh_token".to_string(),
-            serde_json::Value::String(refresh_token.clone()),
+            serde_json::Value::String((*refresh_token).clone()),
         );
-    }
+    });
     root.insert(
         "last_refresh".to_string(),
         serde_json::json!(chrono::Utc::now().to_rfc3339()),
     );
-    let json = serde_json::to_string_pretty(&value)
-        .map_err(|err| crate::msg1(AUTH_ERR_SERIALIZE_AUTH, err))?;
-    write_atomic(path, format!("{json}\n").as_bytes())
+    let json =
+        serde_json::to_string_pretty(&value).expect("serde_json::Value is always serializable");
+    write_atomic_private(path, format!("{json}\n").as_bytes())
         .map_err(|err| crate::msg2(AUTH_ERR_WRITE_AUTH, path.display(), err))
 }
 
@@ -635,6 +722,7 @@ fn refresh_token_url() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::{FAIL_WRITE_OPEN, FailpointGuard};
     use crate::test_utils::{
         ENV_MUTEX, build_id_token, http_ok_response, set_env_guard, spawn_server,
     };
@@ -654,10 +742,19 @@ mod tests {
         let err = read_auth_file(&missing).unwrap_err();
         assert!(err.contains("Auth file not found"));
 
+        let unreadable = dir.path().join("directory");
+        fs::create_dir(&unreadable).unwrap();
+        let err = read_auth_file(&unreadable).unwrap_err();
+        assert!(err.contains("Could not read"));
+
         let bad = dir.path().join("bad.json");
         fs::write(&bad, "{oops").expect("write");
         let err = read_auth_file(&bad).unwrap_err();
         assert!(err.contains("Invalid JSON"));
+
+        fs::write(&bad, r#"{"auth_mode":42}"#).unwrap();
+        let err = read_auth_file(&bad).unwrap_err();
+        assert!(err.contains("Invalid auth_mode: expected a string"));
     }
 
     #[test]
@@ -736,6 +833,24 @@ mod tests {
     }
 
     #[test]
+    fn explicit_api_key_mode_requires_an_api_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        fs::write(
+            &path,
+            serde_json::json!({
+                "auth_mode": "apikey",
+                "tokens": { "account_id": "oauth-account", "access_token": "oauth-access" }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let error = read_auth_file(&path).unwrap_err();
+        assert!(error.contains("API-key authentication has no OPENAI_API_KEY"));
+    }
+
+    #[test]
     fn read_tokens_refuses_non_file_store_modes() {
         let dir = tempfile::tempdir().expect("tempdir");
         let auth_path = dir.path().join("auth.json");
@@ -780,6 +895,39 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("none.json");
         assert!(read_tokens_opt(&path).is_none());
+
+        let invalid = dir.path().join("invalid.json");
+        fs::write(&invalid, "not json").unwrap();
+        assert!(read_tokens_opt(&invalid).is_none());
+    }
+
+    #[test]
+    fn has_auth_distinguishes_ready_and_incomplete_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        fs::write(
+            &path,
+            serde_json::json!({
+                "tokens": {
+                    "account_id": "acct",
+                    "id_token": build_id_token("ready@example.com", "pro"),
+                    "access_token": "access"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(has_auth(&path));
+
+        fs::write(
+            &path,
+            serde_json::json!({
+                "tokens": { "account_id": "acct", "access_token": "access" }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(!has_auth(&path));
     }
 
     #[test]
@@ -789,6 +937,39 @@ mod tests {
         let display = api_key_display_label(&tokens).unwrap();
         assert!(display.starts_with(API_KEY_SEPARATOR));
         assert_eq!(api_key_prefix("abc$123"), "abc-123".to_string());
+    }
+
+    #[test]
+    fn auth_helper_empty_inputs_are_safe() {
+        assert_eq!(AuthStoreMode::File.as_str(), "file");
+        assert_eq!(normalize_plan_type(""), "unknown");
+        assert_eq!(title_case(""), "");
+
+        let empty_prefix = Tokens {
+            account_id: Some("api-key-~suffix".to_string()),
+            id_token: None,
+            access_token: None,
+            refresh_token: None,
+        };
+        assert!(api_key_display_label(&empty_prefix).is_none());
+
+        let empty_suffix = Tokens {
+            account_id: Some("api-key-prefix~".to_string()),
+            id_token: None,
+            access_token: None,
+            refresh_token: None,
+        };
+        assert!(api_key_display_label(&empty_suffix).is_none());
+
+        let malformed_api_key = Tokens {
+            account_id: Some("api-key-invalid".to_string()),
+            id_token: None,
+            access_token: None,
+            refresh_token: None,
+        };
+        let (email, plan) = extract_email_and_plan(&malformed_api_key);
+        assert_eq!(email.as_deref(), Some(API_KEY_LABEL));
+        assert_eq!(plan.as_deref(), Some(API_KEY_LABEL));
     }
 
     #[test]
@@ -850,6 +1031,28 @@ mod tests {
         assert_eq!(identity.principal_id, "sub-1");
         assert_eq!(identity.workspace_or_org_id, "org-1");
         assert_eq!(identity.plan_type, "pro");
+
+        let id_token = build_id_token_payload(
+            r#"{"sub":"sub-2","project_id":"project-2","https://api.openai.com/auth":{"chatgpt_plan_type":"Pro"}}"#,
+        );
+        let tokens = Tokens {
+            account_id: None,
+            id_token: Some(id_token),
+            access_token: Some("acc".to_string()),
+            refresh_token: Some("ref".to_string()),
+        };
+        let identity = extract_profile_identity(&tokens).unwrap();
+        assert_eq!(identity.workspace_or_org_id, "project-2");
+
+        let id_token = build_id_token_payload(r#"{"sub":"sub-3","email":"three@example.com"}"#);
+        let tokens = Tokens {
+            account_id: None,
+            id_token: Some(id_token),
+            access_token: Some("acc".to_string()),
+            refresh_token: Some("ref".to_string()),
+        };
+        let identity = extract_profile_identity(&tokens).unwrap();
+        assert_eq!(identity.workspace_or_org_id, "unknown");
     }
 
     #[test]
@@ -864,6 +1067,23 @@ mod tests {
         assert_eq!(identity.principal_id, "acct-only");
         assert_eq!(identity.workspace_or_org_id, "acct-only");
         assert_eq!(identity.plan_type, "pro");
+
+        let id_token = build_id_token_payload(r#"{"email":"me@example.com"}"#);
+        let tokens = Tokens {
+            account_id: Some("acct-only".to_string()),
+            id_token: Some(id_token),
+            access_token: Some("acc".to_string()),
+            refresh_token: Some("ref".to_string()),
+        };
+        let identity = extract_profile_identity(&tokens).unwrap();
+        assert_eq!(identity.plan_type, "unknown");
+    }
+
+    #[test]
+    fn extract_profile_identity_supports_api_key_profiles() {
+        let identity = extract_profile_identity(&tokens_from_api_key("sk-test")).unwrap();
+        assert_eq!(identity.plan_type, "key");
+        assert_eq!(identity.principal_id, identity.workspace_or_org_id);
     }
 
     #[test]
@@ -918,6 +1138,14 @@ mod tests {
             profile_error(&tokens, None, Some("Pro")),
             Some(crate::AUTH_ERR_PROFILE_MISSING_EMAIL_PLAN)
         );
+
+        let complete = Tokens {
+            account_id: Some("acct".to_string()),
+            id_token: Some(build_id_token("me@example.com", "pro")),
+            access_token: Some("acc".to_string()),
+            refresh_token: None,
+        };
+        assert!(profile_error(&complete, Some("me@example.com"), Some("Pro")).is_none());
     }
 
     #[test]
@@ -1070,6 +1298,14 @@ mod tests {
         });
         fs::write(&path, serde_json::to_string(&rotated).unwrap()).unwrap();
 
+        let rotated_contents = fs::read_to_string(&path).unwrap();
+        let rotated_tokens = read_tokens(&path).unwrap();
+        assert!(same_auth_document_context(
+            &serde_json::to_string(&initial).unwrap(),
+            &rotated_contents
+        ));
+        assert!(same_profile_refresh_target(&rotated_tokens, &tokens));
+
         refresh_profile_tokens(&path, &mut tokens).unwrap();
         assert_eq!(tokens.account_id.as_deref(), Some("acct"));
         assert_eq!(tokens.access_token.as_deref(), Some("new-access"));
@@ -1144,18 +1380,7 @@ mod tests {
     }
 
     #[test]
-    fn account_id_from_id_token_prefers_workspace_claim() {
-        let id_token = build_id_token_payload(
-            "{\"https://api.openai.com/auth\":{\"chatgpt_account_id\":\"ws-123\"},\"organization_id\":\"org-123\"}",
-        );
-        assert_eq!(
-            account_id_from_id_token(&id_token).as_deref(),
-            Some("ws-123")
-        );
-    }
-
-    #[test]
-    fn apply_refresh_updates_account_id_from_refreshed_id_token() {
+    fn apply_refresh_preserves_account_id_when_id_token_claim_changes() {
         let mut tokens = Tokens {
             account_id: Some("acct-old".to_string()),
             id_token: Some(build_id_token("me@example.com", "pro")),
@@ -1171,9 +1396,68 @@ mod tests {
             refresh_token: Some("new-refresh".to_string()),
         };
         apply_refresh(&mut tokens, &refreshed).unwrap();
-        assert_eq!(tokens.account_id.as_deref(), Some("ws-new"));
+        assert_eq!(tokens.account_id.as_deref(), Some("acct-old"));
         assert_eq!(tokens.access_token.as_deref(), Some("new-access"));
         assert_eq!(tokens.refresh_token.as_deref(), Some("new-refresh"));
+    }
+
+    #[test]
+    fn apply_refresh_preserves_optional_fields_when_response_omits_them() {
+        let mut tokens = Tokens {
+            account_id: Some("acct-old".to_string()),
+            id_token: Some(build_id_token("me@example.com", "pro")),
+            access_token: Some("old-access".to_string()),
+            refresh_token: Some("old-refresh".to_string()),
+        };
+        apply_refresh(
+            &mut tokens,
+            &RefreshResponse {
+                id_token: None,
+                access_token: Some("new-access".to_string()),
+                refresh_token: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(tokens.access_token.as_deref(), Some("new-access"));
+        assert_eq!(tokens.refresh_token.as_deref(), Some("old-refresh"));
+        assert_eq!(tokens.account_id.as_deref(), Some("acct-old"));
+    }
+
+    #[test]
+    fn refresh_response_rejects_empty_tokens() {
+        let empty_access = RefreshResponse {
+            id_token: None,
+            access_token: Some("  ".to_string()),
+            refresh_token: None,
+        };
+        assert!(
+            validate_refresh_response(&empty_access)
+                .unwrap_err()
+                .contains("access_token is empty")
+        );
+
+        let empty_refresh = RefreshResponse {
+            id_token: None,
+            access_token: Some("new-access".to_string()),
+            refresh_token: Some(String::new()),
+        };
+        assert!(
+            validate_refresh_response(&empty_refresh)
+                .unwrap_err()
+                .contains("refresh_token is empty")
+        );
+
+        let mut tokens = Tokens {
+            account_id: Some("acct".to_string()),
+            id_token: None,
+            access_token: Some("old-access".to_string()),
+            refresh_token: Some("old-refresh".to_string()),
+        };
+        assert!(
+            apply_refresh(&mut tokens, &empty_access)
+                .unwrap_err()
+                .contains("missing an access token")
+        );
     }
 
     #[test]
@@ -1182,6 +1466,7 @@ mod tests {
         let missing = dir.path().join("missing.json");
         let err = update_auth_tokens(
             &missing,
+            "",
             &RefreshResponse {
                 id_token: None,
                 access_token: None,
@@ -1195,6 +1480,7 @@ mod tests {
         fs::write(&bad, "{oops").unwrap();
         let err = update_auth_tokens(
             &bad,
+            "",
             &RefreshResponse {
                 id_token: None,
                 access_token: None,
@@ -1208,6 +1494,7 @@ mod tests {
         fs::write(&not_obj, "[]").unwrap();
         let err = update_auth_tokens(
             &not_obj,
+            "",
             &RefreshResponse {
                 id_token: None,
                 access_token: None,
@@ -1221,6 +1508,7 @@ mod tests {
         fs::write(&tokens_not_obj, "{\"tokens\": []}").unwrap();
         let err = update_auth_tokens(
             &tokens_not_obj,
+            "",
             &RefreshResponse {
                 id_token: None,
                 access_token: None,
@@ -1229,10 +1517,85 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("Invalid tokens"));
+
+        let missing_tokens = dir.path().join("missing_tokens.json");
+        fs::write(&missing_tokens, "{}").unwrap();
+        let original = fs::read_to_string(&missing_tokens).unwrap();
+        update_auth_tokens(
+            &missing_tokens,
+            &original,
+            &RefreshResponse {
+                id_token: None,
+                access_token: Some("new-access".to_string()),
+                refresh_token: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            read_tokens(&missing_tokens)
+                .unwrap()
+                .access_token
+                .as_deref(),
+            Some("new-access")
+        );
+
+        assert!(parse_auth_store_mode("unsupported").is_err());
     }
 
     #[test]
-    fn update_auth_tokens_writes_account_id_from_refreshed_id_token() {
+    fn update_auth_tokens_reports_atomic_write_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let value = serde_json::json!({
+            "tokens": {"account_id": "acct", "access_token": "old"}
+        });
+        let original = serde_json::to_string(&value).unwrap();
+        fs::write(&path, &original).unwrap();
+        let _failpoint = FailpointGuard::new(FAIL_WRITE_OPEN, 1);
+        let error = update_auth_tokens(
+            &path,
+            &original,
+            &RefreshResponse {
+                id_token: None,
+                access_token: Some("new-access".to_string()),
+                refresh_token: None,
+            },
+        )
+        .unwrap_err();
+        assert!(error.contains("Could not write"), "{error}");
+        assert_eq!(fs::read_to_string(path).unwrap(), original);
+    }
+
+    #[test]
+    fn update_auth_tokens_preserves_file_when_compare_and_swap_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let value = serde_json::json!({
+            "tokens": {
+                "account_id": "acct",
+                "access_token": "old-access",
+                "refresh_token": "old-refresh"
+            }
+        });
+        let original = serde_json::to_string(&value).unwrap();
+        fs::write(&path, &original).unwrap();
+
+        let error = update_auth_tokens(
+            &path,
+            "stale snapshot",
+            &RefreshResponse {
+                id_token: None,
+                access_token: Some("new-access".to_string()),
+                refresh_token: Some("new-refresh".to_string()),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error, AUTH_ERR_REFRESH_STATE_CHANGED);
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn update_auth_tokens_preserves_account_id_when_id_token_claim_changes() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("auth.json");
         let value = serde_json::json!({
@@ -1245,8 +1608,10 @@ mod tests {
         let refreshed_id_token = build_id_token_payload(
             "{\"https://api.openai.com/auth\":{\"chatgpt_account_id\":\"ws-fresh\",\"chatgpt_plan_type\":\"pro\"}}",
         );
+        let original = serde_json::to_string(&value).unwrap();
         update_auth_tokens(
             &path,
+            &original,
             &RefreshResponse {
                 id_token: Some(refreshed_id_token),
                 access_token: Some("new-access".to_string()),
@@ -1255,7 +1620,8 @@ mod tests {
         )
         .unwrap();
         let updated = fs::read_to_string(&path).unwrap();
-        assert!(updated.contains("\"account_id\": \"ws-fresh\""));
+        assert!(updated.contains("\"account_id\": \"acct-old\""));
+        assert!(!updated.contains("\"account_id\": \"ws-fresh\""));
         assert!(updated.contains("\"access_token\": \"new-access\""));
         let updated: serde_json::Value = serde_json::from_str(&updated).unwrap();
         assert!(
@@ -1378,6 +1744,34 @@ mod tests {
     }
 
     #[test]
+    fn refresh_access_token_rejects_a_truncated_success_body() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let response =
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1\r\n\r\n";
+        let url = spawn_server(response.to_string());
+        let _env = set_env_guard(REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR, Some(&url));
+        let error = refresh_access_token("token").unwrap_err();
+        assert!(error.contains("Invalid refresh response"), "{error}");
+    }
+
+    #[test]
+    fn refresh_access_token_reports_transport_errors() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let _env = set_env_guard(
+            REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR,
+            Some("http://127.0.0.1:9"),
+        );
+        let error = refresh_access_token("token").unwrap_err();
+        assert!(error.contains("Token refresh failed"), "{error}");
+    }
+
+    #[test]
+    fn refresh_token_url_uses_the_official_default_without_an_override() {
+        let _env = set_env_guard(REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR, None);
+        assert_eq!(refresh_token_url(), REFRESH_TOKEN_URL);
+    }
+
+    #[test]
     fn refresh_profile_tokens_updates_file() {
         let _guard = ENV_MUTEX.lock().unwrap();
         let ok_body = "{\"access_token\":\"acc\",\"id_token\":\"id\",\"refresh_token\":\"ref\"}";
@@ -1399,5 +1793,345 @@ mod tests {
         refresh_profile_tokens(&path, &mut tokens).unwrap();
         let updated = fs::read_to_string(&path).unwrap();
         assert!(updated.contains("acc"));
+    }
+
+    #[test]
+    fn refresh_profile_tokens_reports_initial_and_post_request_read_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.json");
+        let mut tokens = Tokens {
+            account_id: Some("acct".to_string()),
+            id_token: None,
+            access_token: Some("old".to_string()),
+            refresh_token: Some("refresh".to_string()),
+        };
+        let error = refresh_profile_tokens(&missing, &mut tokens).unwrap_err();
+        assert!(error.contains("Could not read"));
+
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(&mut stream);
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap() > 0 && line != "\r\n" {
+                line.clear();
+            }
+            ready_tx.send(()).unwrap();
+            release_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("refresh release signal");
+            stream
+                .write_all(
+                    http_ok_response(r#"{"access_token":"new"}"#, "application/json").as_bytes(),
+                )
+                .unwrap();
+        });
+        let _env = set_env_guard(REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR, Some(&endpoint));
+        let path = dir.path().join("auth.json");
+        let initial = serde_json::json!({
+            "tokens": {
+                "account_id": "acct",
+                "access_token": "old",
+                "refresh_token": "refresh"
+            }
+        });
+        fs::write(&path, serde_json::to_vec(&initial).unwrap()).unwrap();
+        let path_for_refresh = path.clone();
+        let refresh = std::thread::spawn(move || {
+            let mut tokens = read_tokens(&path_for_refresh).unwrap();
+            refresh_profile_tokens(&path_for_refresh, &mut tokens)
+        });
+        ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("refresh request");
+        fs::remove_file(&path).unwrap();
+        release_tx.send(()).unwrap();
+        let error = refresh.join().unwrap().unwrap_err();
+        assert!(error.contains("Could not read"), "{error}");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn refresh_profile_tokens_rejects_empty_optional_token_without_mutation() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let response = http_ok_response(
+            r#"{"access_token":"new-access","id_token":""}"#,
+            "application/json",
+        );
+        let endpoint = spawn_server(response);
+        let _env = set_env_guard(REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR, Some(&endpoint));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let initial = serde_json::json!({
+            "tokens": {
+                "account_id": "acct",
+                "access_token": "old-access",
+                "refresh_token": "refresh-token"
+            }
+        });
+        let initial_bytes = serde_json::to_vec(&initial).unwrap();
+        fs::write(&path, &initial_bytes).unwrap();
+        let mut tokens = read_tokens(&path).unwrap();
+
+        let error = refresh_profile_tokens(&path, &mut tokens).unwrap_err();
+        assert!(error.contains("id_token is empty"), "{error}");
+        assert_eq!(fs::read(&path).unwrap(), initial_bytes);
+        assert_eq!(tokens.access_token.as_deref(), Some("old-access"));
+    }
+
+    #[test]
+    fn refresh_profile_tokens_rejects_state_changed_after_request() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(&mut stream);
+            let mut length = 0usize;
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            ready_tx.send(()).unwrap();
+            release_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("refresh release signal");
+            stream
+                .write_all(
+                    http_ok_response(
+                        r#"{"access_token":"new-access","refresh_token":"new-refresh"}"#,
+                        "application/json",
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+        });
+        let _env = set_env_guard(REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR, Some(&endpoint));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let initial = serde_json::json!({
+            "tokens": {
+                "account_id": "acct-a",
+                "access_token": "old-access",
+                "refresh_token": "refresh-a"
+            }
+        });
+        fs::write(&path, serde_json::to_string(&initial).unwrap()).unwrap();
+        let path_for_refresh = path.clone();
+        let refresh = std::thread::spawn(move || {
+            let mut tokens = read_tokens(&path_for_refresh).unwrap();
+            refresh_profile_tokens(&path_for_refresh, &mut tokens)
+        });
+
+        ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("refresh request");
+        let replacement = serde_json::json!({
+            "tokens": {
+                "account_id": "acct-b",
+                "access_token": "current-access",
+                "refresh_token": "refresh-b"
+            }
+        });
+        fs::write(&path, serde_json::to_string(&replacement).unwrap()).unwrap();
+        release_tx.send(()).unwrap();
+
+        let error = refresh.join().unwrap().unwrap_err();
+        assert!(error.contains("changed on disk"));
+        assert_eq!(
+            read_tokens(&path).unwrap().account_id.as_deref(),
+            Some("acct-b")
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn refresh_profile_tokens_accepts_same_profile_rotation_after_request() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(&mut stream);
+            let mut length = 0usize;
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).unwrap() > 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            ready_tx.send(()).unwrap();
+            release_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("refresh release signal");
+            stream
+                .write_all(
+                    http_ok_response(r#"{"access_token":"network-access"}"#, "application/json")
+                        .as_bytes(),
+                )
+                .unwrap();
+        });
+        let _env = set_env_guard(REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR, Some(&endpoint));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let id_token = build_id_token_payload(
+            r#"{"sub":"user-1","email":"same@example.com","organization_id":"org-1","https://api.openai.com/auth":{"chatgpt_plan_type":"pro","chatgpt_account_id":"acct"}}"#,
+        );
+        let initial = serde_json::json!({
+            "tokens": {
+                "account_id": "acct",
+                "id_token": id_token,
+                "access_token": "old-access",
+                "refresh_token": "old-refresh"
+            }
+        });
+        fs::write(&path, serde_json::to_vec(&initial).unwrap()).unwrap();
+        let path_for_refresh = path.clone();
+        let refresh = std::thread::spawn(move || {
+            let mut tokens = read_tokens(&path_for_refresh).unwrap();
+            refresh_profile_tokens(&path_for_refresh, &mut tokens).map(|_| tokens)
+        });
+
+        ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("refresh request");
+        let replacement = serde_json::json!({
+            "tokens": {
+                "account_id": "acct",
+                "id_token": initial["tokens"]["id_token"],
+                "access_token": "disk-access",
+                "refresh_token": "disk-refresh"
+            }
+        });
+        fs::write(&path, serde_json::to_vec(&replacement).unwrap()).unwrap();
+        release_tx.send(()).unwrap();
+
+        let tokens = refresh.join().unwrap().unwrap();
+        assert_eq!(tokens.access_token.as_deref(), Some("disk-access"));
+        assert_eq!(tokens.refresh_token.as_deref(), Some("disk-refresh"));
+        assert_eq!(read_tokens(&path).unwrap(), tokens);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn refresh_profile_tokens_rejects_same_tokens_when_auth_mode_changes() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut reader = BufReader::new(&mut stream);
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap() > 0 && line != "\r\n" {
+                line.clear();
+            }
+            ready_tx.send(()).unwrap();
+            release_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("refresh release signal");
+            stream
+                .write_all(
+                    http_ok_response(r#"{"access_token":"new-access"}"#, "application/json")
+                        .as_bytes(),
+                )
+                .unwrap();
+        });
+        let _env = set_env_guard(REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR, Some(&endpoint));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let initial = serde_json::json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "account_id": "acct-a",
+                "access_token": "old-access",
+                "refresh_token": "refresh-a"
+            }
+        });
+        fs::write(&path, serde_json::to_vec(&initial).unwrap()).unwrap();
+        let initial_bytes = fs::read(&path).unwrap();
+        let path_for_refresh = path.clone();
+        let refresh = std::thread::spawn(move || {
+            let mut tokens = read_tokens(&path_for_refresh).unwrap();
+            refresh_profile_tokens(&path_for_refresh, &mut tokens)
+        });
+
+        ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("refresh request");
+        let replacement = serde_json::json!({
+            "auth_mode": null,
+            "tokens": {
+                "account_id": "acct-a",
+                "access_token": "old-access",
+                "refresh_token": "refresh-a"
+            }
+        });
+        fs::write(&path, serde_json::to_vec(&replacement).unwrap()).unwrap();
+        release_tx.send(()).unwrap();
+
+        let error = refresh.join().unwrap().unwrap_err();
+        assert!(error.contains("changed on disk"), "{error}");
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            serde_json::to_vec(&replacement).unwrap()
+        );
+        assert_ne!(fs::read(&path).unwrap(), initial_bytes);
+        server.join().unwrap();
     }
 }

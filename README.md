@@ -21,7 +21,9 @@
 
 ## Overview
 
-Codex Profiles lets you save and switch easily between multiple Codex accounts without repeated `codex login`
+Codex Profiles lets you save and switch between multiple Codex accounts without
+repeated `codex login`. It manages file-backed account credentials; Codex's native
+`--profile` option independently selects configuration settings.
 
 ## Install
 
@@ -71,12 +73,14 @@ Requires Rust 1.94+
 codex-profiles save --label work
 codex-profiles list
 codex-profiles load --label work --force
+codex-profiles status --all --compact
 ```
 
 ## Usage
 
 > [!NOTE]
-> Codex Profiles data is stored under `~/.codex/profiles/` on your machine
+> Codex Profiles data is stored under `$CODEX_HOME/profiles/`, or
+> `~/.codex/profiles/` when `CODEX_HOME` is unset.
 
 ### Command Reference
 
@@ -110,7 +114,7 @@ codex-profiles load --label work --force
     </tr>
     <tr>
       <td width="43%"><code>codex-profiles doctor</code><br/><code>[--fix] [--json]</code></td>
-      <td>Run diagnostics and optionally apply safe repairs</td>
+      <td>Check account storage and local Codex configuration, and optionally repair profile storage</td>
     </tr>
     <tr>
       <td width="43%"><code>codex-profiles label set</code><br/><code>(--label &lt;name&gt; | --id &lt;profile-id&gt;)</code><br/><code>--to &lt;label&gt;</code></td>
@@ -125,8 +129,8 @@ codex-profiles load --label work --force
       <td>Rename an existing label</td>
     </tr>
     <tr>
-      <td width="44%"><code>codex-profiles status</code><br/><code>[--label &lt;name&gt; | --id &lt;profile-id&gt;]</code><br/><code>[--all] [--json]</code></td>
-      <td>Show usage for active, selected, or all targets<br/>Human-readable or JSON output</td>
+      <td width="44%"><code>codex-profiles status</code><br/><code>[--label &lt;name&gt; | --id &lt;profile-id&gt;]</code><br/><code>[--all] [--json | --compact]</code></td>
+      <td>Show usage for active, selected, or all accounts<br/><code>--compact</code> requires <code>--all</code> and groups short usage lines by account and bucket</td>
     </tr>
     <tr>
       <td width="44%"><code>codex-profiles delete</code><br/><code>[--label &lt;name&gt; | --id &lt;profile-id&gt; (repeatable)]</code><br/><code>[--yes]</code></td>
@@ -139,6 +143,12 @@ codex-profiles load --label work --force
 
 - `load` and `delete` are interactive unless you pass `--label` or `--id`
 - With `load --with-status`, the profile still switches even if the status check fails
+- `status --all --compact` shows remaining usage and reset times without progress
+  bars. Use `--json` for scripts; it cannot be combined with `--compact`.
+- Usage windows use the durations reported by Codex, including weekly-only and
+  custom limits. Missing data is shown as unavailable.
+- Finish active Codex work before switching and restart the affected client
+  afterward. See [client compatibility](docs/compatibility.md).
 - Export bundles contain secrets
 
 ## More Docs
@@ -146,6 +156,7 @@ codex-profiles load --label work --force
 - [Client compatibility and credential storage](docs/compatibility.md)
 - [Release verification guide](https://github.com/midhunmonachan/codex-profiles/blob/main/docs/verification.md)
 - [Contribution guide](https://github.com/midhunmonachan/codex-profiles/blob/main/CONTRIBUTING.md)
+- [Next-version research and scope](docs/next-version.md)
 
 ## FAQ
 
@@ -161,17 +172,19 @@ codex-profiles load --label work --force
 <details>
 <summary>Is my auth file uploaded anywhere?</summary>
 
-> Saved profiles stay on your machine. `status` sends the selected account's access
-> token to the configured allowed usage endpoint and may refresh expired tokens
-> through OpenAI. Update checks contact package/release services. Export bundles
-> contain credentials and should be treated like passwords.
+> Saved profiles stay on your machine. For OAuth profiles, `status` may send the
+> access token to the configured allowed usage endpoint and may refresh it through
+> OpenAI after an unauthorized response. API-key profiles show usage as unavailable.
+> Update checks contact package/release services. Export bundles contain credentials
+> and should be treated like passwords.
 </details>
 
 <details>
 <summary>What is a “profile” in this tool?</summary>
 
-> A profile is a saved copy of your `~/.codex/auth.json`. Each profile represents
-> one Codex account
+> An account profile is a saved copy of `$CODEX_HOME/auth.json` (by default,
+> `~/.codex/auth.json`). Native `codex --profile NAME` selects a configuration
+> layer and does not switch these saved accounts.
 </details>
 
 <details>

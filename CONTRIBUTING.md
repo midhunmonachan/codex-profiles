@@ -36,6 +36,30 @@ Feel free to open a PR directly.
 
 - Rust toolchain: `rustup show`
 - Node (for npm packaging)
+- `cargo-audit` for `make check` and `cargo-llvm-cov` for `make coverage`:
+
+```bash
+cargo install cargo-audit --locked
+cargo install cargo-llvm-cov --locked
+rustup component add llvm-tools-preview
+```
+
+## Codex compatibility
+
+Before changing credential handling, refresh behavior, configuration lookup, or
+usage parsing, compare the relevant code with current official OpenAI
+documentation and the `openai/codex` implementation. Record the reviewed upstream
+revision and any support limits in [compatibility.md](docs/compatibility.md).
+Upstream internal types alone do not establish that an app-server method is
+available; check its request registration and documented contract.
+
+Account profiles here store credentials. Native Codex config profiles select
+configuration layers. Keep that distinction in command behavior and user-facing
+documentation, and preserve unsupported-store refusals.
+
+Use synthetic credentials, temporary Codex homes, and loopback servers for tests.
+Concurrency regressions should control request timing explicitly and bound waits.
+Do not use a contributor's live accounts or auth files in automated checks.
 
 ## Checks
 
@@ -54,6 +78,12 @@ make test
 make coverage
 ```
 
+`make coverage` is the standard check for the raw 100% line metric. Keep real I/O,
+terminal, and concurrency tests; do not exclude production code. If a merged source
+report appears covered while the raw gate fails, inspect per-function instances
+because unit-test and CLI binaries can execute different paths. The requirement
+measures executed lines, not 100% branch coverage.
+
 ## Dependency maintenance and merge checks
 
 Dependabot checks Rust dependencies (including transitive dependencies) and GitHub
@@ -66,7 +96,7 @@ The npm platform packages are versioned together by the release process, so they
 are not independently updated by Dependabot.
 
 Every PR, including documentation-only changes, and every push to `main` runs the
-Windows, macOS, Linux, and security-audit checks. The `main` ruleset requires these
+Windows, macOS, Linux, security-audit, and coverage checks. The `main` ruleset requires these
 GitHub Actions checks against an up-to-date branch, a pull request, and resolved
 review conversations. It prevents force pushes and branch deletion, with no
 admin or automation bypass configured. A second person's approval is not required for this
@@ -112,7 +142,8 @@ before each commit and push.
 ## Code Standards
 
 - **Rust edition 2024** - follow existing patterns
-- **90% minimum line coverage** - enforced via `make coverage`
+- **100% line coverage** - enforced via `make coverage`, Linux CI, and the release verification job before artifacts are built or published. Production code must not be excluded to satisfy the gate. This measures executed lines, not every possible branch or proof of correctness.
+- Python 3 is required for the Unix terminal integration tests, which exercise the real CLI prompts in isolated pseudo-terminals with synthetic credentials. The release and package smoke helpers require Python 3.11+ for their standard-library TOML parser.
 - **No type suppression** - avoid `as any`, `#[allow]` without justification
 - **Error handling** - proper `Result` types, no silent failures
 - **Security-first** - especially around token/auth handling

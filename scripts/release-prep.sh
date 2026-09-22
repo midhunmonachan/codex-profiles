@@ -37,5 +37,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 scripts/env-check.sh
-scripts/check.sh
+scripts/check.sh --no-tests
+make coverage
 ./scripts/release-tag "${args[@]}"

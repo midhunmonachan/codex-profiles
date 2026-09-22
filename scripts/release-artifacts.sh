@@ -75,6 +75,9 @@ for artifact_dir in "${artifact_dirs[@]}"; do
   if [[ "${target}" == *windows* ]]; then
     (cd "${artifact_dir}" && zip -j "${release_dir}/codex-profiles-${target}.exe.zip" "${binary}")
   else
+    # GitHub artifact download can normalize executable files to 0644. Restore
+    # the mode before creating the archive so direct extraction remains usable.
+    chmod +x "${artifact_dir}/${binary}"
     tar -C "${artifact_dir}" -czf "${release_dir}/codex-profiles-${target}.tar.gz" "${binary}"
   fi
 done

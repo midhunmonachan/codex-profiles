@@ -1189,6 +1189,22 @@ fn ui_doctor_reports_invalid_profile_file_and_index() {
 }
 
 #[test]
+fn ui_mutation_refuses_invalid_index_without_clobbering_it() {
+    let env = TestEnv::new();
+    seed_alpha(&env);
+    env.run(&["save", "--label", "alpha"]);
+
+    let index_path = env.profiles_dir().join("profiles.json");
+    let corrupted = b"{not-json\n";
+    fs::write(&index_path, corrupted).expect("write broken index");
+
+    let err = env.run_expect_error(&["save", "--label", "replacement"]);
+    assert!(err.contains("invalid JSON"), "{err}");
+    assert!(err.contains("doctor --fix"), "{err}");
+    assert_eq!(fs::read(&index_path).expect("read index"), corrupted);
+}
+
+#[test]
 fn ui_doctor_json_missing_state() {
     let env = TestEnv::new();
     let output = env.run(&["doctor", "--json"]);
@@ -2765,6 +2781,11 @@ fn ui_list_preserves_invalid_profiles() {
 #[test]
 fn ui_status_refreshes_and_mutates_profile_on_usage_401() {
     assert_status_refreshes_profile(&["status"]);
+}
+
+#[test]
+fn ui_status_selected_active_refreshes_auth_and_profile_on_usage_401() {
+    assert_status_refreshes_profile(&["status", "--id", ALPHA_ID]);
 }
 
 #[test]

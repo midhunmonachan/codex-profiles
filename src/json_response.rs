@@ -30,10 +30,9 @@ impl CommandResultJson {
 
     /// Serialize `self` to pretty-printed JSON and print it to stdout.
     pub fn print(&self) -> Result<(), String> {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(self).map_err(|e| e.to_string())?
-        );
+        let json = serde_json::to_string_pretty(self)
+            .expect("CommandResultJson contains only infallible JSON values");
+        println!("{json}");
         Ok(())
     }
 }

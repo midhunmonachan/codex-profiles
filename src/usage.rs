@@ -17,8 +17,11 @@ const USAGE_RETRY_ATTEMPTS: usize = 3;
 const USAGE_RETRY_BASE_MS: u64 = 250;
 const USAGE_BACKOFF_MAX_MS: u64 = 3_000;
 const USAGE_RETRY_JITTER_MS: u64 = 125;
-#[cfg(not(test))]
-const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+const LOCK_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_millis(50)
+} else {
+    Duration::from_secs(10)
+};
 const LOCK_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 #[cfg(test)]
@@ -35,26 +38,31 @@ thread_local! {
 
 #[derive(Clone, Default)]
 pub(crate) struct UsageLimits {
-    pub(crate) five_hour: Option<UsageWindow>,
-    pub(crate) weekly: Option<UsageWindow>,
+    pub(crate) primary: Option<UsageWindow>,
+    pub(crate) secondary: Option<UsageWindow>,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct UsageWindow {
     pub(crate) left_percent: f64,
     pub(crate) reset_at: i64,
+    pub(crate) window_seconds: i64,
 }
 
 #[derive(Clone, Serialize)]
 pub(crate) struct UsageSnapshotWindow {
     pub(crate) left_percent: i64,
     pub(crate) reset_at: i64,
+    pub(crate) window_seconds: i64,
 }
 
 #[derive(Clone, Serialize)]
 pub(crate) struct UsageSnapshotBucket {
     pub(crate) id: String,
     pub(crate) label: String,
+    pub(crate) primary: Option<UsageSnapshotWindow>,
+    pub(crate) secondary: Option<UsageSnapshotWindow>,
+    // Compatibility aliases, populated only for the durations they name.
     pub(crate) five_hour: Option<UsageSnapshotWindow>,
     pub(crate) weekly: Option<UsageSnapshotWindow>,
 }
@@ -161,9 +169,12 @@ fn validate_base_url(value: &str) -> Result<String, String> {
     if is_allowed_base_url(&base) {
         return Ok(base);
     }
-    Err(format!(
-        "Unsupported chatgpt_base_url `{base}`. Use an official ChatGPT host or a loopback address."
-    ))
+    // Configuration can contain query credentials or other private routing
+    // data. Report the setting name without reflecting its value.
+    Err(
+        "Unsupported chatgpt_base_url. Use an official ChatGPT host or a loopback address."
+            .to_string(),
+    )
 }
 
 fn is_allowed_base_url(base_url: &str) -> bool {
@@ -176,7 +187,7 @@ fn is_allowed_base_url(base_url: &str) -> bool {
     scheme == "https" && matches!(host.as_str(), "chatgpt.com" | "chat.openai.com")
 }
 
-fn parsed_url_scheme_and_host(base_url: &str) -> Option<(String, String)> {
+pub(crate) fn parsed_url_scheme_and_host(base_url: &str) -> Option<(String, String)> {
     let (scheme, rest) = base_url
         .split_once("://")
         .map(|(scheme, rest)| (scheme.to_ascii_lowercase(), rest))?;
@@ -208,7 +219,7 @@ fn parsed_url_scheme_and_host(base_url: &str) -> Option<(String, String)> {
     Some((scheme, host))
 }
 
-fn is_loopback_host(host: &str) -> bool {
+pub(crate) fn is_loopback_host(host: &str) -> bool {
     host == "localhost"
         || host
             .parse::<std::net::IpAddr>()
@@ -253,7 +264,8 @@ fn fetch_usage_payload(
         .http_status_as_error(false)
         .build();
     let agent: ureq::Agent = config.into();
-    for attempt in 0..USAGE_RETRY_ATTEMPTS {
+    let mut attempt = 0;
+    loop {
         let response = match agent
             .get(&endpoint)
             .header("Authorization", &format!("Bearer {access_token}"))
@@ -267,6 +279,7 @@ fn fetch_usage_payload(
                     && let Some(delay) = usage_retry_delay(attempt, None)
                 {
                     thread::sleep(delay);
+                    attempt += 1;
                     continue;
                 }
                 return Err(UsageFetchError::Transport(err.to_string()));
@@ -280,6 +293,7 @@ fn fetch_usage_payload(
                 .and_then(|value| value.to_str().ok());
             if let Some(delay) = usage_retry_delay(attempt, retry_after) {
                 thread::sleep(delay);
+                attempt += 1;
                 continue;
             }
         }
@@ -293,7 +307,6 @@ fn fetch_usage_payload(
             .read_json::<UsagePayload>()
             .map_err(|err| UsageFetchError::Parse(err.to_string()));
     }
-    unreachable!("usage retry loop should always return or continue")
 }
 
 fn usage_should_retry_status(status: u16) -> bool {
@@ -315,7 +328,10 @@ fn usage_retry_delay(attempt: usize, retry_after: Option<&str>) -> Option<Durati
         return None;
     }
     if let Some(delay) = retry_after.and_then(parse_retry_after) {
-        return Some(delay);
+        // Honor long server delays by returning the response to the caller.
+        // Never retry earlier than requested or block an interactive command
+        // for an unbounded Retry-After value.
+        return (delay <= Duration::from_millis(USAGE_BACKOFF_MAX_MS)).then_some(delay);
     }
     let shift = attempt.min(10) as u32;
     let base = USAGE_RETRY_BASE_MS.saturating_mul(1u64 << shift);
@@ -326,9 +342,6 @@ fn usage_retry_delay(attempt: usize, retry_after: Option<&str>) -> Option<Durati
 }
 
 fn usage_retry_jitter() -> Duration {
-    if USAGE_RETRY_JITTER_MS == 0 {
-        return Duration::from_millis(0);
-    }
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -392,18 +405,26 @@ fn usage_lines_from_payload(
     let mut lines = Vec::new();
     for bucket in buckets {
         let limits = build_usage_limits_for_rate_limit(bucket.rate_limit.as_ref());
-        let has_data = limits.five_hour.is_some() || limits.weekly.is_some();
+        let has_data = limits.primary.is_some() || limits.secondary.is_some();
         if !has_data {
             continue;
         }
-        let mut bucket_lines = format_usage(
-            format_limit(limits.five_hour.as_ref(), now, unavailable_text),
-            format_limit(limits.weekly.as_ref(), now, unavailable_text),
+        let bucket_lines = format_usage(
+            format_limit(limits.primary.as_ref(), now, unavailable_text),
+            format_limit(limits.secondary.as_ref(), now, unavailable_text),
             unavailable_text,
         );
-        if limits.five_hour.is_some() && limits.weekly.is_some() {
-            bucket_lines = label_dual_window_lines(bucket_lines);
-        }
+        let bucket_lines = [limits.primary.as_ref(), limits.secondary.as_ref()]
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, window)| window.map(|window| (index, window)))
+            .zip(bucket_lines)
+            .map(|((index, window), line)| {
+                format!(
+                    "{}: {line}",
+                    usage_window_label(window.window_seconds, index == 1)
+                )
+            });
         if multi_bucket {
             let label = usage_bucket_label(&bucket);
             lines.push(label.to_string());
@@ -422,14 +443,17 @@ fn usage_lines_from_payload(
     }
 }
 
-fn label_dual_window_lines(mut lines: Vec<String>) -> Vec<String> {
-    if let Some(first) = lines.get_mut(0) {
-        *first = format!("5 hour: {first}");
+fn usage_window_label(seconds: i64, is_secondary: bool) -> String {
+    match seconds {
+        604_800 => "Weekly".to_string(),
+        2_592_000 => "Monthly".to_string(),
+        value if value > 0 && value % 86_400 == 0 => format!("{} day", value / 86_400),
+        value if value > 0 && value % 3_600 == 0 => format!("{} hour", value / 3_600),
+        value if value > 0 && value % 60 == 0 => format!("{} minute", value / 60),
+        value if value > 0 => format!("{value} second"),
+        _ if is_secondary => "Secondary".to_string(),
+        _ => "Primary".to_string(),
     }
-    if let Some(second) = lines.get_mut(1) {
-        *second = format!("Weekly: {second}");
-    }
-    lines
 }
 
 fn usage_buckets(payload: &UsagePayload) -> Vec<UsageBucket> {
@@ -486,29 +510,16 @@ fn usage_bucket_label(bucket: &UsageBucket) -> &str {
 }
 
 fn build_usage_limits_for_rate_limit(rate_limit: Option<&RateLimitDetails>) -> UsageLimits {
-    let mut limits = UsageLimits::default();
     let Some(rate_limit) = rate_limit else {
-        return limits;
+        return UsageLimits::default();
     };
-    let mut windows: Vec<(i64, UsageWindow)> = [
-        rate_limit.primary_window.as_ref(),
-        rate_limit.secondary_window.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
-    .map(|window| (window.limit_window_seconds, usage_window_output(window)))
-    .collect();
-    if windows.is_empty() {
-        return limits;
+    UsageLimits {
+        primary: rate_limit.primary_window.as_ref().map(usage_window_output),
+        secondary: rate_limit
+            .secondary_window
+            .as_ref()
+            .map(usage_window_output),
     }
-    windows.sort_by_key(|(secs, _)| *secs);
-    if let Some((_, first)) = windows.first() {
-        limits.five_hour = Some(first.clone());
-    }
-    if let Some((_, second)) = windows.get(1) {
-        limits.weekly = Some(second.clone());
-    }
-    limits
 }
 
 fn usage_snapshot_from_payload(payload: &UsagePayload) -> Vec<UsageSnapshotBucket> {
@@ -516,17 +527,26 @@ fn usage_snapshot_from_payload(payload: &UsagePayload) -> Vec<UsageSnapshotBucke
         .into_iter()
         .filter_map(|bucket| {
             let limits = build_usage_limits_for_rate_limit(bucket.rate_limit.as_ref());
-            let five_hour = limits.five_hour.as_ref().map(usage_snapshot_window);
-            let weekly = limits.weekly.as_ref().map(usage_snapshot_window);
-            if five_hour.is_none() && weekly.is_none() {
+            let primary = limits.primary.as_ref().map(usage_snapshot_window);
+            let secondary = limits.secondary.as_ref().map(usage_snapshot_window);
+            if primary.is_none() && secondary.is_none() {
                 return None;
             }
+            let window_for_duration = |seconds| {
+                [limits.primary.as_ref(), limits.secondary.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .find(|window| window.window_seconds == seconds)
+                    .map(usage_snapshot_window)
+            };
             let label = usage_bucket_label(&bucket).to_string();
             Some(UsageSnapshotBucket {
                 id: bucket.limit_id,
                 label,
-                five_hour,
-                weekly,
+                primary,
+                secondary,
+                five_hour: window_for_duration(18_000),
+                weekly: window_for_duration(604_800),
             })
         })
         .collect()
@@ -536,6 +556,7 @@ fn usage_snapshot_window(window: &UsageWindow) -> UsageSnapshotWindow {
     UsageSnapshotWindow {
         left_percent: window.left_percent.round() as i64,
         reset_at: window.reset_at,
+        window_seconds: window.window_seconds,
     }
 }
 
@@ -545,6 +566,7 @@ fn usage_window_output(window: &RateLimitWindowSnapshot) -> UsageWindow {
     UsageWindow {
         left_percent,
         reset_at,
+        window_seconds: window.limit_window_seconds,
     }
 }
 
@@ -604,12 +626,12 @@ pub fn format_usage_unavailable(text: &str, use_color: bool) -> String {
 }
 
 pub(crate) fn format_usage(
-    five: UsageLine,
-    weekly: UsageLine,
+    primary: UsageLine,
+    secondary: UsageLine,
     unavailable_text: &str,
 ) -> Vec<String> {
     let use_color = use_color_stdout();
-    let available: Vec<UsageLine> = [five, weekly]
+    let available: Vec<UsageLine> = [primary, secondary]
         .into_iter()
         .filter(|line| line.left_percent.is_some())
         .collect();
@@ -651,19 +673,15 @@ fn format_usage_line(line: &UsageLine, dim: bool, use_color: bool) -> String {
         if !percent.is_empty() {
             out.push_str(&percent);
         }
-        if !resets.is_empty() {
-            if !out.is_empty() {
-                out.push(' ');
-            }
-            out.push_str(&resets);
+        if !out.is_empty() {
+            out.push(' ');
         }
+        out.push_str(&resets);
         return out;
     }
-    let resets = if resets.is_empty() {
-        resets
-    } else {
-        format!(" {resets}")
-    };
+    // `format_resets_suffix` always returns the parenthesized reset label, so
+    // the non-empty branch is the only reachable representation here.
+    let resets = format!(" {resets}");
     let bar = if dim {
         crate::ui::strip_ansi(&line.bar)
     } else {
@@ -709,7 +727,11 @@ fn render_bar(left_percent: f64) -> String {
 }
 
 fn style_usage_bar(bar: &str, left_percent: f64) -> String {
-    if !use_color_stdout() {
+    style_usage_bar_with_color(bar, left_percent, use_color_stdout())
+}
+
+fn style_usage_bar_with_color(bar: &str, left_percent: f64, use_color: bool) -> String {
+    if !use_color {
         return bar.to_string();
     }
     if left_percent >= 66.0 {
@@ -739,7 +761,7 @@ pub fn lock_usage(paths: &Paths) -> Result<UsageLock, String> {
         match try_lock(&mut lock) {
             Ok(true) => break,
             Ok(false) => {
-                if start.elapsed() > lock_timeout() {
+                if start.elapsed() > LOCK_TIMEOUT {
                     return Err(crate::msg1(USAGE_ERR_LOCK_ACQUIRE, command_name()));
                 }
                 thread::sleep(LOCK_RETRY_DELAY);
@@ -753,18 +775,8 @@ pub fn lock_usage(paths: &Paths) -> Result<UsageLock, String> {
 }
 
 #[cfg(not(test))]
-fn lock_timeout() -> Duration {
-    LOCK_TIMEOUT
-}
-
-#[cfg(not(test))]
 fn try_lock(lock: &mut LockFile) -> Result<bool, fslock::Error> {
     lock.try_lock()
-}
-
-#[cfg(test)]
-fn lock_timeout() -> Duration {
-    Duration::from_millis(50)
 }
 
 #[cfg(test)]
@@ -801,9 +813,7 @@ mod tests {
         let addr = listener.local_addr().expect("addr");
         thread::spawn(move || {
             for step in steps {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    break;
-                };
+                let (mut stream, _) = listener.accept().expect("test server accept");
                 let mut buf = [0_u8; 4096];
                 let _ = stream.read(&mut buf);
                 match step {
@@ -857,6 +867,15 @@ mod tests {
         let err = read_base_url(&paths).unwrap_err();
 
         assert!(err.contains("Unsupported chatgpt_base_url"));
+    }
+
+    #[test]
+    fn rejected_base_url_does_not_echo_configuration_secrets() {
+        let error = validate_base_url("https://private.example/secret-path?token=private-token")
+            .unwrap_err();
+        assert!(error.contains("Unsupported chatgpt_base_url"));
+        assert!(!error.contains("private"));
+        assert!(!error.contains("secret"));
     }
 
     #[test]
@@ -923,6 +942,13 @@ mod tests {
             let err = read_base_url(&paths).unwrap_err();
             assert!(err.contains("Unsupported chatgpt_base_url"));
         }
+    }
+
+    #[test]
+    fn parsed_url_rejects_a_missing_scheme_without_leaking_input() {
+        assert_eq!(parsed_url_scheme_and_host("127.0.0.1:8765"), None);
+        assert_eq!(parsed_url_scheme_and_host("localhost"), None);
+        assert_eq!(parsed_url_scheme_and_host("https:///path"), None);
     }
 
     #[test]
@@ -1031,15 +1057,162 @@ mod tests {
 
     #[test]
     fn retry_after_parsing_paths() {
+        assert_eq!(parse_retry_after("  "), None);
         assert_eq!(parse_retry_after("2"), Some(Duration::from_secs(2)));
         assert!(parse_retry_after("Thu, 01 Jan 1970 00:00:00 GMT").is_some());
+        let future = (Utc::now() + chrono::Duration::seconds(60)).to_rfc2822();
+        assert!(parse_retry_after(&future).is_some_and(|delay| delay > Duration::ZERO));
         assert!(parse_retry_after("not-a-date").is_none());
         assert!(usage_retry_delay(USAGE_RETRY_ATTEMPTS - 1, Some("1")).is_none());
         assert!(usage_retry_delay(0, Some("2")).is_some());
+        assert_eq!(usage_retry_delay(0, Some("7")), None);
+        assert_eq!(usage_retry_delay(0, Some("18446744073709551615")), None);
         assert_eq!(
-            usage_retry_delay(0, Some("7")),
-            Some(Duration::from_secs(7))
+            usage_retry_delay(0, Some("3")),
+            Some(Duration::from_secs(3))
         );
+    }
+
+    #[test]
+    fn usage_errors_and_transport_retry_classification() {
+        let transport = UsageFetchError::Transport("connection closed".to_string());
+        assert!(transport.message().contains("connection closed"));
+        assert!(transport.plain_message().contains("connection closed"));
+        assert_eq!(transport.status_code(), None);
+        assert_eq!(transport.to_string(), transport.message());
+
+        let parse = UsageFetchError::Parse("invalid JSON".to_string());
+        assert!(parse.message().contains("invalid JSON"));
+        assert!(parse.plain_message().contains("invalid JSON"));
+
+        assert!(usage_should_retry_transport_error(&ureq::Error::Timeout(
+            ureq::Timeout::Global,
+        )));
+        assert!(usage_should_retry_transport_error(&ureq::Error::Io(
+            std::io::Error::other("socket"),
+        )));
+        assert!(usage_should_retry_transport_error(
+            &ureq::Error::HostNotFound
+        ));
+        assert!(usage_should_retry_transport_error(
+            &ureq::Error::ConnectionFailed
+        ));
+        assert!(!usage_should_retry_transport_error(
+            &ureq::Error::StatusCode(503)
+        ));
+        assert!(usage_should_retry_status(429));
+        assert!(usage_should_retry_status(503));
+        assert!(!usage_should_retry_status(400));
+    }
+
+    #[test]
+    fn usage_bucket_order_labels_and_colored_formatting_paths() {
+        let other = UsageBucket {
+            limit_id: "other".to_string(),
+            label: "   ".to_string(),
+            rate_limit: None,
+        };
+        let codex = UsageBucket {
+            limit_id: "codex".to_string(),
+            label: "codex".to_string(),
+            rate_limit: None,
+        };
+        let ordered = ordered_usage_buckets(vec![other, codex]);
+        assert_eq!(ordered[0].limit_id, "codex");
+        assert_eq!(usage_bucket_label(&ordered[1]), "unknown");
+
+        let _plain = set_plain_guard(false);
+        assert!(format_usage_unavailable("unavailable", true).contains("unavailable"));
+        assert!(style_usage_bar_with_color("bar", 80.0, true).contains("bar"));
+        assert!(style_usage_bar_with_color("bar", 50.0, true).contains("bar"));
+        assert!(style_usage_bar_with_color("bar", 10.0, true).contains("bar"));
+
+        let colored = UsageLine {
+            bar: "bar".to_string(),
+            percent: "50%".to_string(),
+            reset: "soon".to_string(),
+            left_percent: Some(50),
+        };
+        assert!(!format_usage_line(&colored, false, true).is_empty());
+        let empty_percent = UsageLine {
+            bar: "bar".to_string(),
+            percent: String::new(),
+            reset: String::new(),
+            left_percent: Some(50),
+        };
+        assert!(!format_usage_line(&empty_percent, true, true).is_empty());
+        drop(_plain);
+
+        let _plain = set_plain_guard(true);
+        let plain = format_usage_line(&colored, false, false);
+        assert!(plain.contains("left"));
+    }
+
+    #[test]
+    fn usage_labels_follow_actual_window_duration() {
+        for (seconds, label) in [
+            (604_800, "Weekly"),
+            (2_592_000, "Monthly"),
+            (172_800, "2 day"),
+            (18_000, "5 hour"),
+            (900, "15 minute"),
+            (90, "90 second"),
+            (0, "Primary"),
+            (-1, "Primary"),
+        ] {
+            assert_eq!(usage_window_label(seconds, false), label);
+        }
+        assert_eq!(usage_window_label(0, true), "Secondary");
+    }
+
+    #[test]
+    fn weekly_only_window_preserves_position_and_duration() {
+        let _plain = set_plain_guard(true);
+        let payload: UsagePayload = serde_json::from_value(serde_json::json!({
+            "rate_limit": {
+                "secondary_window": {
+                    "used_percent": 25,
+                    "limit_window_seconds": 604800,
+                    "reset_at": 2000000000
+                }
+            }
+        }))
+        .unwrap();
+        let buckets = usage_snapshot_from_payload(&payload);
+        assert!(buckets[0].primary.is_none());
+        assert!(buckets[0].five_hour.is_none());
+        assert_eq!(
+            buckets[0].secondary.as_ref().unwrap().window_seconds,
+            604800
+        );
+        assert_eq!(buckets[0].weekly.as_ref().unwrap().left_percent, 75);
+        let lines = usage_lines_from_payload(&payload, "unavailable", Local::now());
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with("Weekly: 75% left"));
+    }
+
+    #[test]
+    fn usage_windows_keep_upstream_order_with_accurate_compatibility_aliases() {
+        let payload: UsagePayload = serde_json::from_value(serde_json::json!({
+            "rate_limit": {
+                "primary_window": {"used_percent": 70, "limit_window_seconds": 604800, "reset_at": 1},
+                "secondary_window": {"used_percent": 20, "limit_window_seconds": 18000, "reset_at": 2}
+            },
+            "additional_rate_limits": [{
+                "metered_feature": "custom",
+                "rate_limit": {
+                    "primary_window": {"used_percent": 5, "limit_window_seconds": 900, "reset_at": 3}
+                }
+            }]
+        })).unwrap();
+        let buckets = usage_snapshot_from_payload(&payload);
+        assert_eq!(buckets[0].primary.as_ref().unwrap().window_seconds, 604800);
+        assert_eq!(buckets[0].secondary.as_ref().unwrap().window_seconds, 18000);
+        assert_eq!(buckets[0].weekly.as_ref().unwrap().left_percent, 30);
+        assert_eq!(buckets[0].five_hour.as_ref().unwrap().left_percent, 80);
+        assert_eq!(buckets[1].primary.as_ref().unwrap().window_seconds, 900);
+        assert!(buckets[1].five_hour.is_none());
+        assert!(buckets[1].weekly.is_none());
     }
 
     #[test]
@@ -1049,7 +1222,7 @@ mod tests {
             additional_rate_limits: None,
         };
         let limits = build_usage_limits(&payload);
-        assert!(limits.five_hour.is_none());
+        assert!(limits.primary.is_none());
 
         let window = RateLimitWindowSnapshot {
             used_percent: 50.0,
@@ -1065,9 +1238,19 @@ mod tests {
             additional_rate_limits: None,
         };
         let limits = build_usage_limits(&payload);
-        assert!(limits.five_hour.is_some());
-        let line = format_limit(limits.five_hour.as_ref(), Local::now(), "none");
+        assert!(limits.primary.is_some());
+        let line = format_limit(limits.primary.as_ref(), Local::now(), "none");
         assert!(line.left_percent.is_some());
+
+        let invalid_reset = UsageWindow {
+            left_percent: 50.0,
+            reset_at: i64::MAX,
+            window_seconds: 900,
+        };
+        assert_eq!(
+            format_limit(Some(&invalid_reset), Local::now(), "none").reset,
+            "unknown"
+        );
     }
 
     #[test]
@@ -1089,7 +1272,7 @@ mod tests {
             }]),
         };
         let limits = build_usage_limits(&payload);
-        assert!(limits.five_hour.is_some());
+        assert!(limits.primary.is_some());
     }
 
     #[test]

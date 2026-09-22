@@ -56,8 +56,10 @@ impl UpdateAction {
     /// Returns string representation of the command-line arguments for invoking the update.
     pub fn command_str(self) -> String {
         let (command, args) = self.command_args();
-        shlex::try_join(std::iter::once(command).chain(args.iter().copied()))
-            .unwrap_or_else(|_| format!("{command} {}", args.join(" ")))
+        std::iter::once(command)
+            .chain(args.iter().copied())
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 }
 
@@ -154,6 +156,7 @@ fn update_cache_checked_default() -> DateTime<Utc> {
     DateTime::<Utc>::from_timestamp(0, 0).unwrap_or_else(Utc::now)
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum UpdatePromptOutcome {
     Continue,
     RunUpdate(UpdateAction),
@@ -175,8 +178,8 @@ fn run_update_prompt_if_needed_with_io(
     config: &UpdateConfig,
     is_debug: bool,
     is_tty: bool,
-    input: &mut impl io::BufRead,
-    output: &mut impl Write,
+    input: &mut dyn io::BufRead,
+    output: &mut dyn Write,
 ) -> Result<UpdatePromptOutcome, String> {
     run_update_prompt_if_needed_with_io_and_source(
         config,
@@ -193,8 +196,8 @@ fn run_update_prompt_if_needed_with_io_and_source(
     is_debug: bool,
     is_tty: bool,
     install_source: InstallSource,
-    input: &mut impl io::BufRead,
-    output: &mut impl Write,
+    input: &mut dyn io::BufRead,
+    output: &mut dyn Write,
 ) -> Result<UpdatePromptOutcome, String> {
     if is_debug {
         return Ok(UpdatePromptOutcome::Continue);
@@ -226,28 +229,16 @@ fn run_update_prompt_if_needed_with_io_and_source(
         return Ok(UpdatePromptOutcome::Continue);
     }
 
-    write_prompt(
-        output,
-        format_args!(
-            "\n✨ {} {current_version} -> {latest_version}\n",
-            UPDATE_TITLE_AVAILABLE
-        ),
-    )?;
-    write_prompt(
-        output,
-        format_args!("{}", crate::msg1(UPDATE_RELEASE_NOTES, RELEASE_NOTES_URL)),
-    )?;
-    write_prompt(output, format_args!("\n"))?;
-    write_prompt(
-        output,
-        format_args!(
-            "{}",
-            crate::msg1(UPDATE_OPTION_NOW, update_action.command_str())
-        ),
-    )?;
-    write_prompt(output, format_args!("{}", UPDATE_OPTION_SKIP))?;
-    write_prompt(output, format_args!("{}", UPDATE_OPTION_SKIP_VERSION))?;
-    write_prompt(output, format_args!("{}", UPDATE_PROMPT_SELECT))?;
+    let prompt = format!(
+        "\n✨ {} {current_version} -> {latest_version}\n{}\n{}{}{}{}",
+        UPDATE_TITLE_AVAILABLE,
+        crate::msg1(UPDATE_RELEASE_NOTES, RELEASE_NOTES_URL),
+        crate::msg1(UPDATE_OPTION_NOW, update_action.command_str()),
+        UPDATE_OPTION_SKIP,
+        UPDATE_OPTION_SKIP_VERSION,
+        UPDATE_PROMPT_SELECT,
+    );
+    write_prompt(output, format_args!("{prompt}"))?;
     output.flush().map_err(prompt_io_error)?;
     let _ = mark_prompted_now(config);
 
@@ -275,7 +266,7 @@ fn prompt_io_error(err: impl std::fmt::Display) -> String {
     crate::msg1(UPDATE_ERR_SHOW_PROMPT, err)
 }
 
-fn write_prompt(output: &mut impl Write, args: std::fmt::Arguments) -> Result<(), String> {
+fn write_prompt(output: &mut dyn Write, args: std::fmt::Arguments) -> Result<(), String> {
     output.write_fmt(args).map_err(prompt_io_error)
 }
 
@@ -483,10 +474,20 @@ fn mark_prompted_now(config: &UpdateConfig) -> Result<(), String> {
 
 fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
     let mut iter = v.trim().split('.');
-    let maj = iter.next()?.parse::<u64>().ok()?;
-    let min = iter.next()?.parse::<u64>().ok()?;
-    let pat = iter.next()?.parse::<u64>().ok()?;
+    let maj_raw = iter.next().unwrap_or_default();
+    let min_raw = iter.next()?;
+    let pat_raw = iter.next()?;
+    let maj = parse_version_component(maj_raw);
+    let min = parse_version_component(min_raw);
+    let pat = parse_version_component(pat_raw);
+    let (Some(maj), Some(min), Some(pat)) = (maj, min, pat) else {
+        return None;
+    };
     Some((maj, min, pat))
+}
+
+fn parse_version_component(value: &str) -> Option<u64> {
+    value.parse::<u64>().ok()
 }
 
 fn updates_disabled_with_debug(config: &UpdateConfig, is_debug: bool) -> bool {
@@ -506,7 +507,7 @@ fn paths_for_update(codex_home: PathBuf) -> Paths {
 }
 
 fn read_update_cache(paths: &Paths) -> Result<Option<UpdateCache>, String> {
-    if !paths.update_cache.is_file() {
+    if !paths.update_cache.exists() {
         if let Some(legacy) = read_legacy_update_cache(paths)? {
             let _ = write_update_cache(paths, &legacy);
             return Ok(Some(legacy));
@@ -523,15 +524,19 @@ fn read_update_cache(paths: &Paths) -> Result<Option<UpdateCache>, String> {
 
 fn write_update_cache(paths: &Paths, cache: &UpdateCache) -> Result<(), String> {
     let _lock = lock_usage(paths)?;
-    let contents = serde_json::to_string_pretty(cache).map_err(|e| e.to_string())?;
+    let contents = serde_json::to_string_pretty(cache)
+        .expect("UpdateCache contains only infallible JSON values");
     write_atomic(&paths.update_cache, format!("{contents}\n").as_bytes())
 }
 
 fn read_legacy_update_cache(paths: &Paths) -> Result<Option<UpdateCache>, String> {
-    if !paths.profiles_index.is_file() {
+    if !paths.profiles_index.exists() {
         return Ok(None);
     }
-    let contents = fs::read_to_string(&paths.profiles_index).map_err(|e| e.to_string())?;
+    let contents = match fs::read_to_string(&paths.profiles_index) {
+        Ok(contents) => contents,
+        Err(err) => return Err(err.to_string()),
+    };
     let json: serde_json::Value = serde_json::from_str(&contents).map_err(|e| e.to_string())?;
     let Some(value) = json.get("update_cache") else {
         return Ok(None);
@@ -552,29 +557,18 @@ fn update_agent() -> ureq::Agent {
 
 fn latest_release_url() -> String {
     #[cfg(test)]
-    {
-        env_url(LATEST_RELEASE_URL_OVERRIDE_ENV_VAR, LATEST_RELEASE_URL)
+    if let Ok(url) = std::env::var(LATEST_RELEASE_URL_OVERRIDE_ENV_VAR) {
+        return url;
     }
-    #[cfg(not(test))]
-    {
-        LATEST_RELEASE_URL.to_string()
-    }
+    LATEST_RELEASE_URL.to_string()
 }
 
 fn homebrew_cask_url() -> String {
     #[cfg(test)]
-    {
-        env_url(HOMEBREW_CASK_URL_OVERRIDE_ENV_VAR, HOMEBREW_CASK_URL)
+    if let Ok(url) = std::env::var(HOMEBREW_CASK_URL_OVERRIDE_ENV_VAR) {
+        return url;
     }
-    #[cfg(not(test))]
-    {
-        HOMEBREW_CASK_URL.to_string()
-    }
-}
-
-#[cfg(test)]
-fn env_url(override_var: &str, default: &str) -> String {
-    std::env::var(override_var).unwrap_or_else(|_| default.to_string())
+    HOMEBREW_CASK_URL.to_string()
 }
 
 #[cfg(test)]
@@ -582,6 +576,7 @@ mod tests {
     use super::*;
     use crate::test_utils::{ENV_MUTEX, http_ok_response, set_env_guard, spawn_server};
     use std::fs;
+    use std::io::{self, Read};
     use std::path::PathBuf;
 
     fn seed_version_info(config: &UpdateConfig, version: &str) {
@@ -603,6 +598,10 @@ mod tests {
         assert_eq!(cmd, "npm");
         assert!(args.contains(&"install"));
         assert!(UpdateAction::BunGlobalLatest.command_str().contains("bun"));
+        assert_eq!(
+            UpdateAction::BrewUpgrade.command_args(),
+            ("brew", &["upgrade", "codex-profiles"] as &[&str])
+        );
     }
 
     #[test]
@@ -638,6 +637,19 @@ mod tests {
     fn get_update_action_debug() {
         assert!(get_update_action_with_debug(true, InstallSource::Npm).is_none());
         assert!(get_update_action_with_debug(false, InstallSource::Npm).is_some());
+        assert_eq!(
+            get_update_action_with_debug(false, InstallSource::Bun),
+            Some(UpdateAction::BunGlobalLatest)
+        );
+        assert_eq!(
+            get_update_action_with_debug(false, InstallSource::Brew),
+            Some(UpdateAction::BrewUpgrade)
+        );
+        assert_eq!(
+            get_update_action_with_debug(false, InstallSource::Unknown),
+            None
+        );
+        let _ = get_update_action();
     }
 
     #[test]
@@ -656,6 +668,12 @@ mod tests {
     #[test]
     fn parse_version_and_compare() {
         assert_eq!(parse_version("1.2.3"), Some((1, 2, 3)));
+        assert_eq!(parse_version("bad.2.3"), None);
+        assert_eq!(parse_version("1.bad.3"), None);
+        assert_eq!(parse_version("1.2.bad"), None);
+        assert_eq!(parse_version("1.2"), None);
+        assert_eq!(parse_version("1"), None);
+        assert_eq!(parse_version(""), None);
         assert!(is_newer("2.0.0", "1.9.9").unwrap());
         assert!(is_newer("bad", "1.0.0").is_none());
     }
@@ -668,6 +686,11 @@ mod tests {
             Some("http://example.com"),
         );
         assert_eq!(latest_release_url(), "http://example.com");
+        drop(_env);
+        let _latest_default = set_env_guard(LATEST_RELEASE_URL_OVERRIDE_ENV_VAR, None);
+        assert_eq!(latest_release_url(), LATEST_RELEASE_URL);
+        let _cask_default = set_env_guard(HOMEBREW_CASK_URL_OVERRIDE_ENV_VAR, None);
+        assert_eq!(homebrew_cask_url(), HOMEBREW_CASK_URL);
     }
 
     #[test]
@@ -696,6 +719,22 @@ mod tests {
         let resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string();
         let url = spawn_server(resp);
         let _env = set_env_guard(LATEST_RELEASE_URL_OVERRIDE_ENV_VAR, Some(&url));
+        assert!(fetch_version_from_release().is_none());
+    }
+
+    #[test]
+    fn fetch_versions_handle_invalid_bodies() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let short_body = spawn_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 10\r\n\r\nx"
+                .to_string(),
+        );
+        let _cask_env = set_env_guard(HOMEBREW_CASK_URL_OVERRIDE_ENV_VAR, Some(&short_body));
+        assert!(fetch_version_from_cask().is_none());
+
+        let malformed_json = spawn_server(http_ok_response("{", "application/json"));
+        let _release_env =
+            set_env_guard(LATEST_RELEASE_URL_OVERRIDE_ENV_VAR, Some(&malformed_json));
         assert!(fetch_version_from_release().is_none());
     }
 
@@ -750,11 +789,47 @@ mod tests {
             check_for_update_on_startup: false,
         };
         assert!(updates_disabled_with_debug(&config, false));
+        assert!(get_upgrade_version_with_debug(&config, false).is_none());
         let config = UpdateConfig {
             codex_home: PathBuf::new(),
             check_for_update_on_startup: true,
         };
         assert!(updates_disabled_with_debug(&config, true));
+        assert!(get_upgrade_version_with_debug(&config, false).is_none());
+        assert!(get_upgrade_version_for_popup_with_debug(&config, false).is_none());
+        let disabled = UpdateConfig {
+            codex_home: PathBuf::new(),
+            check_for_update_on_startup: false,
+        };
+        assert!(get_upgrade_version_for_popup_with_debug(&disabled, false).is_none());
+    }
+
+    #[test]
+    fn update_prompt_debug_mode_is_a_noop() {
+        let config = UpdateConfig {
+            codex_home: PathBuf::new(),
+            check_for_update_on_startup: true,
+        };
+        assert_eq!(
+            run_update_prompt_if_needed(&config).unwrap(),
+            UpdatePromptOutcome::Continue
+        );
+
+        let mut input = std::io::Cursor::new("");
+        let mut output = Vec::new();
+        assert_eq!(
+            run_update_prompt_if_needed_with_io_and_source(
+                &config,
+                true,
+                true,
+                InstallSource::Npm,
+                &mut input,
+                &mut output,
+            )
+            .unwrap(),
+            UpdatePromptOutcome::Continue
+        );
+        assert!(output.is_empty());
     }
 
     #[test]
@@ -782,7 +857,7 @@ mod tests {
             &mut output,
         )
         .unwrap();
-        assert!(matches!(result, UpdatePromptOutcome::Continue));
+        assert_eq!(result, UpdatePromptOutcome::Continue);
 
         let cache = read_update_cache(&paths_for_update(config.codex_home.clone()))
             .unwrap()
@@ -790,6 +865,25 @@ mod tests {
         assert!(cache.last_prompted_at.is_none());
         let output = String::from_utf8(output).expect("utf8 output");
         assert!(output.contains("Run `npm install -g codex-profiles` to update."));
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = UpdateConfig {
+            codex_home: dir.path().to_path_buf(),
+            check_for_update_on_startup: true,
+        };
+        seed_version_info(&config, "99.0.0");
+        let mut input = std::io::Cursor::new("");
+        let mut output = Vec::new();
+        let result = run_update_prompt_if_needed_with_io_and_source(
+            &config,
+            false,
+            false,
+            InstallSource::Unknown,
+            &mut input,
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(result, UpdatePromptOutcome::Continue);
 
         let dir = tempfile::tempdir().expect("tempdir");
         let config = UpdateConfig {
@@ -808,7 +902,10 @@ mod tests {
             &mut output,
         )
         .unwrap();
-        assert!(matches!(result, UpdatePromptOutcome::RunUpdate(_)));
+        assert_eq!(
+            result,
+            UpdatePromptOutcome::RunUpdate(UpdateAction::NpmGlobalLatest)
+        );
 
         let cache = read_update_cache(&paths_for_update(config.codex_home.clone()))
             .unwrap()
@@ -826,7 +923,7 @@ mod tests {
             &mut output,
         )
         .unwrap();
-        assert!(matches!(result, UpdatePromptOutcome::Continue));
+        assert_eq!(result, UpdatePromptOutcome::Continue);
         assert!(output.is_empty());
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -846,6 +943,518 @@ mod tests {
             &mut output,
         )
         .unwrap();
-        assert!(matches!(result, UpdatePromptOutcome::Continue));
+        assert_eq!(result, UpdatePromptOutcome::Continue);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = UpdateConfig {
+            codex_home: dir.path().to_path_buf(),
+            check_for_update_on_startup: true,
+        };
+        seed_version_info(&config, "99.0.0");
+        let mut input = std::io::Cursor::new("2\n");
+        let mut output = Vec::new();
+        let result = run_update_prompt_if_needed_with_io_and_source(
+            &config,
+            false,
+            true,
+            InstallSource::Npm,
+            &mut input,
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(result, UpdatePromptOutcome::Continue);
+    }
+
+    struct FailingWriter {
+        writes: usize,
+        fail_write: Option<usize>,
+        fail_contains: Option<&'static [u8]>,
+        fail_flush: bool,
+    }
+
+    struct FailingReader;
+
+    impl Read for FailingReader {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("synthetic read failure"))
+        }
+    }
+
+    impl Write for FailingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.writes += 1;
+            if self.fail_write == Some(self.writes)
+                || self
+                    .fail_contains
+                    .is_some_and(|needle| bytes.windows(needle.len()).any(|part| part == needle))
+            {
+                return Err(io::Error::other("synthetic write failure"));
+            }
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            if self.fail_flush {
+                Err(io::Error::other("synthetic flush failure"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn prompt_reports_output_errors_and_unrecognised_choices() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = UpdateConfig {
+            codex_home: dir.path().to_path_buf(),
+            check_for_update_on_startup: true,
+        };
+        seed_version_info(&config, "99.0.0");
+        let mut input = std::io::Cursor::new("");
+        let mut output = FailingWriter {
+            writes: 0,
+            fail_write: None,
+            fail_contains: Some(b"Run `"),
+            fail_flush: false,
+        };
+        let result = run_update_prompt_if_needed_with_io_and_source(
+            &config,
+            false,
+            false,
+            InstallSource::Npm,
+            &mut input,
+            &mut output,
+        );
+        assert!(result.is_err(), "writes: {}", output.writes);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = UpdateConfig {
+            codex_home: dir.path().to_path_buf(),
+            check_for_update_on_startup: true,
+        };
+        seed_version_info(&config, "99.0.0");
+        let mut input = std::io::Cursor::new("");
+        let mut output = FailingWriter {
+            writes: 0,
+            fail_write: Some(1),
+            fail_contains: None,
+            fail_flush: false,
+        };
+        assert!(
+            run_update_prompt_if_needed_with_io_and_source(
+                &config,
+                false,
+                false,
+                InstallSource::Npm,
+                &mut input,
+                &mut output,
+            )
+            .is_err()
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = UpdateConfig {
+            codex_home: dir.path().to_path_buf(),
+            check_for_update_on_startup: true,
+        };
+        seed_version_info(&config, "99.0.0");
+        let mut input = std::io::Cursor::new("2\n");
+        let mut output = FailingWriter {
+            writes: 0,
+            fail_write: Some(1),
+            fail_contains: None,
+            fail_flush: false,
+        };
+        let result = run_update_prompt_if_needed_with_io_and_source(
+            &config,
+            false,
+            true,
+            InstallSource::Npm,
+            &mut input,
+            &mut output,
+        );
+        assert!(result.is_err(), "writes: {}", output.writes);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = UpdateConfig {
+            codex_home: dir.path().to_path_buf(),
+            check_for_update_on_startup: true,
+        };
+        seed_version_info(&config, "99.0.0");
+        let mut input = std::io::Cursor::new("2\n");
+        let mut output = FailingWriter {
+            writes: 0,
+            fail_write: None,
+            fail_contains: Some(b"2) Skip"),
+            fail_flush: false,
+        };
+        assert!(
+            run_update_prompt_if_needed_with_io_and_source(
+                &config,
+                false,
+                true,
+                InstallSource::Npm,
+                &mut input,
+                &mut output,
+            )
+            .is_err()
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = UpdateConfig {
+            codex_home: dir.path().to_path_buf(),
+            check_for_update_on_startup: true,
+        };
+        seed_version_info(&config, "99.0.0");
+        let mut input = std::io::Cursor::new("2\n");
+        let mut output = FailingWriter {
+            writes: 0,
+            fail_write: None,
+            fail_contains: None,
+            fail_flush: true,
+        };
+        assert!(
+            run_update_prompt_if_needed_with_io_and_source(
+                &config,
+                false,
+                true,
+                InstallSource::Npm,
+                &mut input,
+                &mut output,
+            )
+            .is_err()
+        );
+
+        for needle in [b"https://github.com".as_slice(), b"runs `npm".as_slice()] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let config = UpdateConfig {
+                codex_home: dir.path().to_path_buf(),
+                check_for_update_on_startup: true,
+            };
+            seed_version_info(&config, "99.0.0");
+            let mut input = std::io::Cursor::new("2\n");
+            let mut output = FailingWriter {
+                writes: 0,
+                fail_write: None,
+                fail_contains: Some(needle),
+                fail_flush: false,
+            };
+            let result = run_update_prompt_if_needed_with_io_and_source(
+                &config,
+                false,
+                true,
+                InstallSource::Npm,
+                &mut input,
+                &mut output,
+            );
+            assert!(
+                result.is_err(),
+                "needle: {:?}, writes: {}",
+                needle,
+                output.writes
+            );
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = UpdateConfig {
+            codex_home: dir.path().to_path_buf(),
+            check_for_update_on_startup: true,
+        };
+        seed_version_info(&config, "99.0.0");
+        let mut input = std::io::Cursor::new("2\n");
+        let mut output = FailingWriter {
+            writes: 0,
+            fail_write: None,
+            fail_contains: None,
+            fail_flush: false,
+        };
+        assert!(
+            run_update_prompt_if_needed_with_io_and_source(
+                &config,
+                false,
+                true,
+                InstallSource::Npm,
+                &mut input,
+                &mut output,
+            )
+            .is_ok()
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = UpdateConfig {
+            codex_home: dir.path().to_path_buf(),
+            check_for_update_on_startup: true,
+        };
+        seed_version_info(&config, "99.0.0");
+        let mut input = std::io::BufReader::new(FailingReader);
+        let mut output = Vec::new();
+        let err = run_update_prompt_if_needed_with_io_and_source(
+            &config,
+            false,
+            true,
+            InstallSource::Npm,
+            &mut input,
+            &mut output,
+        )
+        .unwrap_err();
+        assert!(err.contains("Could not read update choice"));
+    }
+
+    #[test]
+    fn update_cache_defaults_and_empty_or_legacy_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = paths_for_update(dir.path().to_path_buf());
+        fs::create_dir_all(&paths.profiles).unwrap();
+        fs::write(&paths.profiles_lock, "").unwrap();
+        fs::write(&paths.update_cache, "{\"latest_version\":\"1.2.3\"}").unwrap();
+        let cache = read_update_cache(&paths).unwrap().unwrap();
+        assert_eq!(cache.last_checked_at, update_cache_checked_default());
+
+        fs::write(&paths.update_cache, "\n").unwrap();
+        assert!(read_update_cache(&paths).unwrap().is_none());
+
+        fs::remove_file(&paths.update_cache).unwrap();
+        fs::write(&paths.profiles_index, "{\"version\":2,\"profiles\":{}}").unwrap();
+        assert!(read_update_cache(&paths).unwrap().is_none());
+    }
+
+    #[test]
+    fn update_cache_read_error_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = paths_for_update(dir.path().to_path_buf());
+        fs::create_dir_all(&paths.profiles).unwrap();
+        fs::write(&paths.profiles_lock, "").unwrap();
+
+        fs::create_dir(&paths.update_cache).unwrap();
+        assert!(read_update_cache(&paths).is_err());
+        fs::remove_dir(&paths.update_cache).unwrap();
+        fs::write(&paths.update_cache, "not json").unwrap();
+        assert!(read_update_cache(&paths).is_err());
+        fs::remove_file(&paths.update_cache).unwrap();
+
+        fs::create_dir(&paths.profiles_index).unwrap();
+        assert!(read_update_cache(&paths).is_err());
+        fs::remove_dir(&paths.profiles_index).unwrap();
+        fs::write(&paths.profiles_index, "not json").unwrap();
+        assert!(read_update_cache(&paths).is_err());
+
+        let legacy = serde_json::json!({
+            "update_cache": {"latest_version": 7}
+        });
+        fs::write(
+            &paths.profiles_index,
+            serde_json::to_string(&legacy).unwrap(),
+        )
+        .unwrap();
+        assert!(read_update_cache(&paths).is_err());
+
+        let legacy = serde_json::json!({
+            "update_cache": {
+                "latest_version": "1.2.3",
+                "last_checked_at": "2024-01-01T00:00:00Z"
+            },
+            "profiles": "invalid"
+        });
+        fs::write(
+            &paths.profiles_index,
+            serde_json::to_string(&legacy).unwrap(),
+        )
+        .unwrap();
+        let migrated = read_update_cache(&paths).unwrap().unwrap();
+        assert_eq!(migrated.latest_version, "1.2.3");
+    }
+
+    #[test]
+    fn update_version_fetch_and_refresh_paths() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let release_body = "{\"tag_name\":\"v99.0.0\"}";
+        let release_url = spawn_server(http_ok_response(release_body, "application/json"));
+        let _env = set_env_guard(LATEST_RELEASE_URL_OVERRIDE_ENV_VAR, Some(&release_url));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = UpdateConfig {
+            codex_home: dir.path().to_path_buf(),
+            check_for_update_on_startup: true,
+        };
+        let initial_paths = paths_for_update(config.codex_home.clone());
+        fs::create_dir_all(&initial_paths.profiles).unwrap();
+        fs::write(&initial_paths.profiles_lock, "").unwrap();
+        assert_eq!(
+            get_upgrade_version_with_debug(&config, false).as_deref(),
+            Some("99.0.0")
+        );
+
+        let paths = paths_for_update(config.codex_home.clone());
+        let mut stale = read_update_cache(&paths).unwrap().unwrap();
+        stale.last_checked_at = Utc::now() - Duration::hours(21);
+        write_update_cache(&paths, &stale).unwrap();
+        assert_eq!(
+            get_upgrade_version_with_debug(&config, false).as_deref(),
+            Some("99.0.0")
+        );
+        for _ in 0..100 {
+            if read_update_cache(&paths)
+                .unwrap()
+                .is_some_and(|value| value.last_checked_at > stale.last_checked_at)
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            read_update_cache(&paths)
+                .unwrap()
+                .is_some_and(|value| value.last_checked_at > stale.last_checked_at)
+        );
+
+        let mut unknown_input = std::io::Cursor::new("");
+        let mut unknown_output = Vec::new();
+        let result = run_update_prompt_if_needed_with_io_and_source(
+            &config,
+            false,
+            false,
+            InstallSource::Unknown,
+            &mut unknown_input,
+            &mut unknown_output,
+        )
+        .unwrap();
+        assert_eq!(result, UpdatePromptOutcome::Continue);
+
+        let current = current_version().to_string();
+        let mut current_info = read_update_cache(&paths).unwrap().unwrap();
+        current_info.latest_version = current;
+        current_info.dismissed_version = Some(current_info.latest_version.clone());
+        current_info.last_checked_at = Utc::now();
+        write_update_cache(&paths, &current_info).unwrap();
+        assert!(get_upgrade_version_for_popup_with_debug(&config, false).is_none());
+
+        current_info.latest_version = "99.0.0".to_string();
+        current_info.dismissed_version = Some("99.0.0".to_string());
+        write_update_cache(&paths, &current_info).unwrap();
+        assert!(get_upgrade_version_for_popup_with_debug(&config, false).is_none());
+    }
+
+    #[test]
+    fn update_fetch_error_and_brew_fallback_paths() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let not_found = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+        let cask_404 = spawn_server(not_found.to_string());
+        let _cask_env = set_env_guard(HOMEBREW_CASK_URL_OVERRIDE_ENV_VAR, Some(&cask_404));
+        assert!(fetch_version_from_cask().is_none());
+        let cask_error = spawn_server(
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".to_string(),
+        );
+        let _cask_error_env = set_env_guard(HOMEBREW_CASK_URL_OVERRIDE_ENV_VAR, Some(&cask_error));
+        assert!(fetch_version_from_cask().is_none());
+
+        let release_error = spawn_server(
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".to_string(),
+        );
+        let _release_env = set_env_guard(LATEST_RELEASE_URL_OVERRIDE_ENV_VAR, Some(&release_error));
+        assert!(fetch_version_from_release().is_none());
+
+        let stale_dir = tempfile::tempdir().expect("tempdir");
+        let stale_paths = paths_for_update(stale_dir.path().to_path_buf());
+        fs::create_dir_all(&stale_paths.profiles).unwrap();
+        fs::write(&stale_paths.profiles_lock, "").unwrap();
+        let mut stale = build_update_cache(Some("99.0.0".to_string()), None, None);
+        stale.last_checked_at = Utc::now() - Duration::hours(21);
+        write_update_cache(&stale_paths, &stale).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&stale_paths.profiles, fs::Permissions::from_mode(0o500)).unwrap();
+        }
+        let error_refresh = spawn_server(
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".to_string(),
+        );
+        let _error_refresh_env =
+            set_env_guard(LATEST_RELEASE_URL_OVERRIDE_ENV_VAR, Some(&error_refresh));
+        assert_eq!(
+            get_upgrade_version_with_debug(
+                &UpdateConfig {
+                    codex_home: stale_dir.path().to_path_buf(),
+                    check_for_update_on_startup: true,
+                },
+                false,
+            )
+            .as_deref(),
+            Some("99.0.0")
+        );
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        let cask_ok = spawn_server(http_ok_response("version \"99.0.0\"", "text/plain"));
+        let _cask_ok_env = set_env_guard(HOMEBREW_CASK_URL_OVERRIDE_ENV_VAR, Some(&cask_ok));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = paths_for_update(dir.path().to_path_buf());
+        fs::create_dir_all(&paths.profiles).unwrap();
+        fs::write(&paths.profiles_lock, "").unwrap();
+        check_for_update_with_action(&paths, Some(UpdateAction::BrewUpgrade)).unwrap();
+        assert!(
+            fs::read_to_string(&paths.update_cache)
+                .unwrap()
+                .contains("99.0.0")
+        );
+    }
+
+    #[test]
+    fn dismiss_and_prompt_persistence_error_paths() {
+        let disabled = UpdateConfig {
+            codex_home: PathBuf::new(),
+            check_for_update_on_startup: false,
+        };
+        assert!(dismiss_version(&disabled, "1.2.3").is_ok());
+        assert!(mark_prompted_now(&disabled).is_ok());
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let enabled = UpdateConfig {
+            codex_home: dir.path().to_path_buf(),
+            check_for_update_on_startup: true,
+        };
+        assert!(dismiss_version(&enabled, "1.2.3").is_ok());
+        assert!(mark_prompted_now(&enabled).is_ok());
+
+        seed_version_info(&enabled, "99.0.0");
+        let paths = paths_for_update(enabled.codex_home.clone());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&paths.profiles, fs::Permissions::from_mode(0o500)).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            fs::remove_file(&paths.profiles_lock).unwrap();
+            fs::create_dir(&paths.profiles_lock).unwrap();
+        }
+        assert!(dismiss_version(&enabled, "99.0.0").is_err());
+        let mut input = std::io::Cursor::new("3\n");
+        let mut output = Vec::new();
+        let result = run_update_prompt_if_needed_with_io_and_source(
+            &enabled,
+            false,
+            true,
+            InstallSource::Npm,
+            &mut input,
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(result, UpdatePromptOutcome::Continue);
+        assert!(!output.is_empty());
+
+        let mut input = std::io::Cursor::new("3\n");
+        let mut output = FailingWriter {
+            writes: 0,
+            fail_write: None,
+            fail_contains: Some(b"Failed to persist"),
+            fail_flush: false,
+        };
+        let result = run_update_prompt_if_needed_with_io_and_source(
+            &enabled,
+            false,
+            true,
+            InstallSource::Npm,
+            &mut input,
+            &mut output,
+        );
+        assert!(result.is_err());
     }
 }

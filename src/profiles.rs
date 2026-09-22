@@ -3,6 +3,8 @@ use colored::Colorize;
 use inquire::{Confirm, MultiSelect, Select};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::fmt;
@@ -13,28 +15,29 @@ use std::path::{Path, PathBuf};
 
 use crate::json_response::CommandResultJson;
 use crate::{
-    AUTH_ERR_INCOMPLETE_ACCOUNT, AUTH_ERR_PROFILE_MISSING_EMAIL_PLAN, PROFILE_COPY_CONTEXT_LOAD,
+    AUTH_ERR_AMBIGUOUS_SAVED_PROFILES, AUTH_ERR_INCOMPLETE_ACCOUNT,
+    AUTH_ERR_PROFILE_MISSING_EMAIL_PLAN, AUTH_ERR_REFRESH_STATE_CHANGED, PROFILE_COPY_CONTEXT_LOAD,
     PROFILE_COPY_CONTEXT_SAVE, PROFILE_DELETE_HELP, PROFILE_ERR_COPY_CONTEXT,
     PROFILE_ERR_CURRENT_NOT_SAVED, PROFILE_ERR_DELETE_CONFIRM_REQUIRED, PROFILE_ERR_FAILED_DELETE,
     PROFILE_ERR_ID_NO_MATCH, PROFILE_ERR_ID_NOT_FOUND, PROFILE_ERR_INDEX_INVALID_JSON,
     PROFILE_ERR_LABEL_EMPTY, PROFILE_ERR_LABEL_EXISTS, PROFILE_ERR_LABEL_NO_MATCH,
     PROFILE_ERR_LABEL_NOT_FOUND, PROFILE_ERR_PROMPT_CONTEXT, PROFILE_ERR_PROMPT_DELETE,
     PROFILE_ERR_PROMPT_LOAD, PROFILE_ERR_READ_INDEX, PROFILE_ERR_READ_PROFILES_DIR,
-    PROFILE_ERR_RENAME_PROFILE, PROFILE_ERR_SELECTED_INVALID, PROFILE_ERR_SERIALIZE_INDEX,
-    PROFILE_ERR_SYNC_CURRENT, PROFILE_ERR_TTY_REQUIRED, PROFILE_ERR_WRITE_INDEX, PROFILE_LOAD_HELP,
+    PROFILE_ERR_RENAME_PROFILE, PROFILE_ERR_SELECTED_INVALID, PROFILE_ERR_SYNC_CURRENT,
+    PROFILE_ERR_TTY_REQUIRED, PROFILE_ERR_WRITE_INDEX, PROFILE_LOAD_HELP,
     PROFILE_MSG_DELETED_COUNT, PROFILE_MSG_DELETED_WITH, PROFILE_MSG_LABEL_CLEARED,
-    PROFILE_MSG_LABEL_SET, PROFILE_MSG_LOADED_WITH, PROFILE_MSG_NOT_FOUND, PROFILE_MSG_SAVED,
-    PROFILE_MSG_SAVED_WITH, PROFILE_PROMPT_CANCEL, PROFILE_PROMPT_CONTINUE_WITHOUT_SAVING,
-    PROFILE_PROMPT_DELETE_MANY, PROFILE_PROMPT_DELETE_ONE, PROFILE_PROMPT_DELETE_SELECTED,
-    PROFILE_PROMPT_SAVE_AND_CONTINUE, PROFILE_SUMMARY_AUTH_ERROR, PROFILE_SUMMARY_ERROR,
-    PROFILE_SUMMARY_FILE_MISSING, PROFILE_SUMMARY_USAGE_ERROR, PROFILE_UNSAVED_NO_MATCH,
-    PROFILE_WARN_CURRENT_NOT_SAVED_REASON, PROFILE_WARN_LOADED_STATUS_FAILED, UI_ERROR_PREFIX,
-    UI_ERROR_TWO_LINE,
+    PROFILE_MSG_LABEL_SET, PROFILE_MSG_LOADED_WITH, PROFILE_MSG_NOT_FOUND, PROFILE_MSG_SAVED_WITH,
+    PROFILE_PROMPT_CANCEL, PROFILE_PROMPT_CONTINUE_WITHOUT_SAVING, PROFILE_PROMPT_DELETE_MANY,
+    PROFILE_PROMPT_DELETE_ONE, PROFILE_PROMPT_DELETE_SELECTED, PROFILE_PROMPT_SAVE_AND_CONTINUE,
+    PROFILE_SUMMARY_AUTH_ERROR, PROFILE_SUMMARY_ERROR, PROFILE_SUMMARY_FILE_MISSING,
+    PROFILE_SUMMARY_USAGE_ERROR, PROFILE_UNSAVED_NO_MATCH, PROFILE_WARN_CURRENT_NOT_SAVED_REASON,
+    PROFILE_WARN_LOADED_STATUS_FAILED, UI_ERROR_PREFIX, UI_ERROR_TWO_LINE,
 };
 use crate::{
-    AuthFile, ProfileIdentityKey, Tokens, extract_email_and_plan, extract_profile_identity,
-    is_api_key_profile, is_free_plan, is_profile_ready, profile_error, read_tokens,
-    read_tokens_opt, require_identity, token_account_id, tokens_from_api_key,
+    AuthFile, ProfileIdentityKey, Tokens, ensure_file_auth_store, extract_email_and_plan,
+    extract_profile_identity, is_api_key_profile, is_free_plan, is_profile_ready, profile_error,
+    read_tokens, read_tokens_opt, require_identity, resolve_auth_file_mode, token_account_id,
+    tokens_from_api_key,
 };
 use crate::{
     CANCELLED_MESSAGE, format_action, format_entry_header, format_error, format_label_later_hint,
@@ -51,6 +54,12 @@ use crate::{UsageLock, format_usage_unavailable, lock_usage, read_base_url, usag
 const DEFAULT_USAGE_CONCURRENCY: usize = 32;
 const MAX_USAGE_CONCURRENCY: usize = 128;
 const USAGE_CONCURRENCY_ENV: &str = "CODEX_PROFILES_USAGE_CONCURRENCY";
+
+#[cfg(test)]
+thread_local! {
+    static FORCE_USAGE_POOL_FALLBACK: Cell<bool> = const { Cell::new(false) };
+    static FORCE_STATUS_SELECTED_AUTH_CHANGE: Cell<bool> = const { Cell::new(false) };
+}
 
 #[derive(Serialize, Deserialize)]
 struct ExportBundle {
@@ -107,11 +116,8 @@ pub fn save_profile(paths: &Paths, label: Option<String>, json: bool) -> Result<
     }
 
     let info = profile_info(Some(&tokens), label_display.clone(), true, use_color);
-    let message = if info.email.is_some() {
-        crate::msg1(PROFILE_MSG_SAVED_WITH, info.display)
-    } else {
-        PROFILE_MSG_SAVED.to_string()
-    };
+    // resolve_save_id requires a complete identity, including its display email.
+    let message = crate::msg1(PROFILE_MSG_SAVED_WITH, info.display);
     let mut message = format_action(&message, use_color);
     if label_display.is_none() {
         message.push('\n');
@@ -260,10 +266,10 @@ pub fn export_profiles(
         version: 1,
         profiles,
     };
-    let mut bytes = serde_json::to_vec_pretty(&bundle).map_err(|err| err.to_string())?;
+    let mut bytes = serde_json::to_vec_pretty(&bundle)
+        .expect("export bundles contain only JSON values and string keys");
     bytes.push(b'\n');
     crate::common::write_atomic_private(&output, &bytes)?;
-    tighten_export_permissions(&output)?;
 
     let count = bundle.profiles.len();
     let noun = if count == 1 { "profile" } else { "profiles" };
@@ -308,17 +314,28 @@ pub fn import_profiles(paths: &Paths, input: PathBuf, json: bool) -> Result<(), 
     let mut store = ProfileStore::load(paths)?;
     let existing_ids = collect_profile_ids(&paths.profiles)?;
     let mut staged_labels = store.labels.clone();
-    let mut seen_ids = HashSet::new();
+    // Lowercase keys make bundles portable across case-sensitive and
+    // case-insensitive filesystems. This catches ASCII and Unicode lowercase
+    // aliases; the target existence check below remains necessary because
+    // Windows has filesystem-specific normalization rules beyond lowercasing.
+    let mut seen_id_keys = HashSet::new();
     let mut prepared = Vec::with_capacity(bundle.profiles.len());
     for profile in bundle.profiles {
         validate_import_profile_id(&profile.id)?;
-        if !seen_ids.insert(profile.id.clone()) {
+        if !seen_id_keys.insert(normalized_import_id_key(&profile.id)) {
             return Err(format!(
                 "Error: Import bundle contains duplicate profile id '{}'.",
                 profile.id
             ));
         }
-        if existing_ids.contains(&profile.id) {
+        let target = profile_path_for_id(&paths.profiles, &profile.id);
+        let target_exists = target.try_exists().map_err(|err| {
+            format!(
+                "Error: Could not inspect profile '{}' before import: {err}",
+                profile.id
+            )
+        })?;
+        if existing_ids.contains(&profile.id) || target_exists {
             return Err(format!("Error: Profile '{}' already exists.", profile.id));
         }
         if let Some(label) = profile.label.as_deref() {
@@ -396,6 +413,8 @@ pub fn load_profile(
     crate::ensure_file_auth_store(&paths.auth)?;
     let use_color_err = use_color_stderr();
     let use_color_out = use_color_stdout();
+    let mut expected_active_tokens = read_tokens_opt(&paths.auth);
+    let mut expected_active_auth = read_auth_contents_opt(&paths.auth);
     let no_profiles = format_no_profiles(paths, use_color_err);
     let (mut snapshot, mut ordered) = load_snapshot_ordered(paths, true, &no_profiles)?;
 
@@ -409,6 +428,8 @@ pub fn load_profile(
                 let result = load_snapshot_ordered(paths, true, &no_profiles)?;
                 snapshot = result.0;
                 ordered = result.1;
+                expected_active_tokens = read_tokens_opt(&paths.auth);
+                expected_active_auth = read_auth_contents_opt(&paths.auth);
             }
             LoadChoice::ContinueWithoutSaving => {}
             LoadChoice::Cancel => {
@@ -428,32 +449,24 @@ pub fn load_profile(
     let selected_id = selected.id.clone();
     let selected_display = selected.display.clone();
 
-    match snapshot.tokens.get(&selected_id) {
-        Some(Ok(_)) => {}
-        Some(Err(err)) => {
-            let message = err
-                .strip_prefix(&format!("{} ", UI_ERROR_PREFIX))
-                .unwrap_or(err);
-            return Err(crate::msg1(PROFILE_ERR_SELECTED_INVALID, message));
-        }
-        None => {
-            return Err(profile_not_found(use_color_err));
-        }
-    }
+    validate_selected_profile(&snapshot, &selected_id, use_color_err)?;
 
     let mut store = ProfileStore::load(paths)?;
 
-    if let Err(err) = sync_current(paths, &mut store.profiles_index) {
-        let warning = format_warning(&err, use_color_err);
-        eprintln!("{warning}");
-    }
+    revalidate_load_state(
+        paths,
+        &snapshot,
+        &selected_id,
+        &expected_active_tokens,
+        &expected_active_auth,
+    )?;
+    // Preserve the current account before replacing auth.json. A failure here
+    // must abort the switch; continuing would destroy the only current copy.
+    // Resolver exact-token matching keeps duplicate aliases from being
+    // overwritten, while ambiguous rotated aliases fail closed.
+    sync_current(paths, &mut store.profiles_index)?;
 
-    let source = profile_path_for_id(&paths.profiles, &selected_id);
-    if !source.is_file() {
-        return Err(profile_not_found(use_color_err));
-    }
-
-    copy_profile(&source, &paths.auth, PROFILE_COPY_CONTEXT_LOAD)?;
+    copy_selected_profile(paths, &selected_id, use_color_err)?;
 
     let label = label_for_id(&store.labels, &selected_id);
     let tokens = snapshot
@@ -471,20 +484,8 @@ pub fn load_profile(
     drop(store);
 
     if json {
-        let mut profile_json = serde_json::json!({
-            "id": selected_id,
-            "label": label,
-        });
-        if with_status {
-            match current_status_json_value(paths) {
-                Ok(status) => {
-                    profile_json["status"] = status;
-                }
-                Err(err) => {
-                    profile_json["status_error"] = serde_json::Value::String(normalize_error(&err));
-                }
-            }
-        }
+        let status = with_status.then(|| current_status_json_value(paths));
+        let profile_json = loaded_profile_json(&selected_id, label, status);
         let result = CommandResultJson::success("load", profile_json);
         result.print()?;
         return Ok(());
@@ -500,6 +501,45 @@ pub fn load_profile(
         eprintln!("{}", format_warning(&message, use_color_err));
     }
     Ok(())
+}
+
+fn validate_selected_profile(
+    snapshot: &Snapshot,
+    selected_id: &str,
+    use_color: bool,
+) -> Result<(), String> {
+    match snapshot.tokens.get(selected_id) {
+        Some(Ok(_)) => Ok(()),
+        Some(Err(err)) => {
+            let message = err
+                .strip_prefix(&format!("{} ", UI_ERROR_PREFIX))
+                .unwrap_or(err);
+            Err(crate::msg1(PROFILE_ERR_SELECTED_INVALID, message))
+        }
+        None => Err(profile_not_found(use_color)),
+    }
+}
+
+fn copy_selected_profile(paths: &Paths, selected_id: &str, use_color: bool) -> Result<(), String> {
+    let source = profile_path_for_id(&paths.profiles, selected_id);
+    if !source.is_file() {
+        return Err(profile_not_found(use_color));
+    }
+    copy_profile(&source, &paths.auth, PROFILE_COPY_CONTEXT_LOAD)
+}
+
+fn loaded_profile_json(
+    id: &str,
+    label: Option<String>,
+    status: Option<Result<serde_json::Value, String>>,
+) -> serde_json::Value {
+    let mut profile = serde_json::json!({"id": id, "label": label});
+    match status {
+        Some(Ok(status)) => profile["status"] = status,
+        Some(Err(error)) => profile["status_error"] = normalize_error(&error).into(),
+        None => {}
+    }
+    profile
 }
 
 pub fn delete_profile(
@@ -529,10 +569,6 @@ pub fn delete_profile(
         .iter()
         .map(|item| (item.id.clone(), item.display.clone()))
         .unzip();
-
-    if selected_ids.is_empty() {
-        return Ok(());
-    }
 
     let mut store = ProfileStore::load(paths)?;
     if !yes && !confirm_delete_profiles(&displays)? {
@@ -639,12 +675,13 @@ pub fn list_profiles(paths: &Paths, json: bool, show_id: bool) -> Result<(), Str
 pub fn status_profiles(
     paths: &Paths,
     all: bool,
+    compact: bool,
     label: Option<String>,
     id: Option<String>,
     json: bool,
 ) -> Result<(), String> {
     if all {
-        return status_all_profiles(paths, json);
+        return status_all_profiles(paths, compact, json);
     }
 
     if label.is_some() || id.is_some() {
@@ -685,7 +722,7 @@ fn current_status_entry(paths: &Paths, json: bool) -> Result<(Option<Entry>, Lis
 fn current_status_json_value(paths: &Paths) -> Result<serde_json::Value, String> {
     let (current, _) = current_status_entry(paths, true)?;
     let payload = current.map(status_profile_json);
-    serde_json::to_value(payload).map_err(|err| crate::msg1(PROFILE_ERR_SERIALIZE_INDEX, err))
+    Ok(serde_json::to_value(payload).expect("status profile JSON is serializable"))
 }
 
 fn loaded_profile_status(paths: &Paths) -> Result<(), String> {
@@ -736,18 +773,41 @@ fn status_selected_profile(
     } else if let Some(id) = id {
         select_by_id(id, &candidates)?
     } else {
-        unreachable!("status selector requires label or id")
+        return Err(crate::msg1(
+            PROFILE_ERR_SELECTED_INVALID,
+            "status selector requires a label or id",
+        ));
     };
 
-    let mut entries = make_entries(
-        std::slice::from_ref(&selected.id),
-        &snapshot,
-        current_saved_id.as_deref(),
-        &ctx,
-    );
-    let Some(entry) = entries.pop() else {
-        return Err(profile_not_found(use_color_stderr()));
+    #[cfg(test)]
+    if FORCE_STATUS_SELECTED_AUTH_CHANGE.with(|force| force.replace(false)) {
+        fs::write(&paths.auth, b"not-json").expect("test auth mutation should succeed");
+    }
+
+    let mut entries = if current_saved_id.as_deref() == Some(selected.id.as_str()) {
+        vec![make_selected_current_entry(
+            paths,
+            &selected.id,
+            current_saved_id.as_deref(),
+            &snapshot.labels,
+            &snapshot.tokens,
+            &ctx,
+        )?]
+    } else {
+        make_entries(
+            std::slice::from_ref(&selected.id),
+            &snapshot,
+            current_saved_id.as_deref(),
+            &ctx,
+        )
     };
+    // Every candidate comes from `ordered`; the selected current path builds
+    // one entry directly and the saved path asks `make_entries` for that same
+    // single ID. An empty result would therefore violate the selector
+    // invariant rather than represent a user-facing not-found case.
+    let entry = entries
+        .pop()
+        .expect("selected profile must produce one status entry");
 
     if json {
         return print_current_status_json(Some(entry));
@@ -758,7 +818,24 @@ fn status_selected_profile(
     Ok(())
 }
 
-fn status_all_profiles(paths: &Paths, json: bool) -> Result<(), String> {
+fn make_selected_current_entry(
+    paths: &Paths,
+    selected_id: &str,
+    current_saved_id: Option<&str>,
+    labels: &Labels,
+    tokens_map: &BTreeMap<String, Result<Tokens, String>>,
+    ctx: &ListCtx,
+) -> Result<Entry, String> {
+    let Some(entry) = make_current(paths, current_saved_id, labels, tokens_map, ctx) else {
+        return Err(profile_not_found(use_color_stderr()));
+    };
+    if entry.id.as_deref() != Some(selected_id) {
+        return Err(AUTH_ERR_REFRESH_STATE_CHANGED.to_string());
+    }
+    Ok(entry)
+}
+
+fn status_all_profiles(paths: &Paths, compact: bool, json: bool) -> Result<(), String> {
     let snapshot = load_snapshot(paths, false)?;
     let current_saved_id = current_saved_id(paths, &snapshot.tokens);
     let mut ctx = ListCtx::new(paths, true, true, false);
@@ -772,7 +849,7 @@ fn status_all_profiles(paths: &Paths, json: bool) -> Result<(), String> {
         .filter(|id| current_saved_id.as_deref() != Some(id.as_str()))
         .collect();
 
-    let (current_entry, list_entries) = rayon::join(
+    let (current_entry, mut list_entries) = rayon::join(
         || {
             make_current(
                 paths,
@@ -784,6 +861,13 @@ fn status_all_profiles(paths: &Paths, json: bool) -> Result<(), String> {
         },
         || make_entries(&filtered, &snapshot, None, &ctx),
     );
+
+    // A concurrent load can change the active account after the snapshot was
+    // filtered. The fresh current entry is authoritative; avoid rendering its
+    // ID a second time from the stale list without issuing another request.
+    if let Some(current_id) = current_entry.as_ref().and_then(|entry| entry.id.as_deref()) {
+        list_entries.retain(|entry| entry.id.as_deref() != Some(current_id));
+    }
 
     if json {
         let mut profiles = Vec::new();
@@ -797,6 +881,17 @@ fn status_all_profiles(paths: &Paths, json: bool) -> Result<(), String> {
     if current_entry.is_none() && list_entries.is_empty() {
         let message = format_no_profiles(paths, ctx.use_color);
         print_output_block(&message);
+        return Ok(());
+    }
+
+    if compact {
+        let mut entries = Vec::new();
+        if let Some(entry) = current_entry {
+            entries.push(entry);
+        }
+        entries.extend(list_entries);
+        let lines = render_compact_entries(&entries, &ctx);
+        print_output_block(&lines.join("\n"));
         return Ok(());
     }
 
@@ -918,7 +1013,7 @@ pub(crate) fn read_profiles_index_relaxed(paths: &Paths) -> ProfilesIndex {
 
 pub(crate) fn write_profiles_index(paths: &Paths, index: &ProfilesIndex) -> Result<(), String> {
     let json = serde_json::to_string_pretty(index)
-        .map_err(|err| crate::msg1(PROFILE_ERR_SERIALIZE_INDEX, err))?;
+        .expect("profile metadata contains only JSON values and string keys");
     crate::common::write_atomic_private(&paths.profiles_index, format!("{json}\n").as_bytes())
         .map_err(|err| crate::msg1(PROFILE_ERR_WRITE_INDEX, err))
 }
@@ -1136,9 +1231,7 @@ fn resolve_label_target_id(
         return resolve_label_id(&store.labels, label);
     }
 
-    let Some(id) = id else {
-        unreachable!("clap enforces label target selector")
-    };
+    let id = id.ok_or_else(|| "Error: Select a saved profile by label or id.".to_string())?;
     if store.profiles_index.profiles.contains_key(id) {
         return Ok(id.to_string());
     }
@@ -1150,15 +1243,20 @@ fn resolve_label_target_id(
 }
 
 pub fn profile_files(profiles_dir: &Path) -> Result<Vec<PathBuf>, String> {
-    let mut files = Vec::new();
     if !profiles_dir.exists() {
-        return Ok(files);
+        return Ok(Vec::new());
     }
     let entries = fs::read_dir(profiles_dir)
         .map_err(|err| crate::msg1(PROFILE_ERR_READ_PROFILES_DIR, err))?;
+    collect_profile_files(entries.map(|entry| entry.map(|entry| entry.path())))
+}
+
+fn collect_profile_files(
+    entries: impl Iterator<Item = io::Result<PathBuf>>,
+) -> Result<Vec<PathBuf>, String> {
+    let mut files = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(|err| crate::msg1(PROFILE_ERR_READ_PROFILES_DIR, err))?;
-        let path = entry.path();
+        let path = entry.map_err(|err| crate::msg1(PROFILE_ERR_READ_PROFILES_DIR, err))?;
         if !is_profile_file(&path) {
             continue;
         }
@@ -1228,16 +1326,14 @@ fn prepare_import_profile(profile: ExportedProfile) -> Result<PreparedImportProf
         label,
         contents,
     } = profile;
-    let mut bytes = serde_json::to_vec_pretty(&contents).map_err(|err| {
-        format!(
-            "Error: Exported profile '{}' could not be serialized: {err}",
-            id
-        )
-    })?;
+    let mut bytes = serde_json::to_vec_pretty(&contents)
+        .expect("a parsed JSON value can be serialized to an in-memory buffer");
     bytes.push(b'\n');
 
-    let auth: AuthFile = serde_json::from_value(contents)
+    let auth: AuthFile = serde_json::from_value(contents.clone())
         .map_err(|err| format!("Error: Exported profile '{}' is invalid JSON: {err}", id))?;
+    let auth = resolve_auth_file_mode(&contents, auth)
+        .map_err(|err| format!("Error: Exported profile '{id}': {err}"))?;
     let tokens = if let Some(tokens) = auth.tokens {
         tokens
     } else if let Some(api_key) = auth.openai_api_key.as_deref() {
@@ -1265,33 +1361,24 @@ fn validate_import_profile_id(id: &str) -> Result<(), String> {
     if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
         return Err(format!("Error: Imported profile id '{}' is not safe.", id));
     }
-    if matches!(id, "profiles" | "update") {
+    if is_reserved_profile_id(id) {
         return Err(format!("Error: Imported profile id '{}' is reserved.", id));
     }
     Ok(())
+}
+
+fn normalized_import_id_key(id: &str) -> String {
+    id.to_lowercase()
+}
+
+fn is_reserved_profile_id(id: &str) -> bool {
+    id.eq_ignore_ascii_case("profiles") || id.eq_ignore_ascii_case("update")
 }
 
 fn cleanup_imported_profiles(paths: &Paths, ids: &[String]) {
     for id in ids {
         let _ = fs::remove_file(profile_path_for_id(&paths.profiles, id));
     }
-}
-
-fn tighten_export_permissions(path: &Path) -> Result<(), String> {
-    #[cfg(not(unix))]
-    let _ = path;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let permissions = fs::Permissions::from_mode(0o600);
-        fs::set_permissions(path, permissions).map_err(|err| {
-            format!(
-                "Error: Could not secure export file {}: {err}",
-                path.display()
-            )
-        })?;
-    }
-    Ok(())
 }
 
 pub fn load_profile_tokens_map(
@@ -1331,7 +1418,7 @@ pub(crate) fn resolve_save_id(
 
 pub(crate) fn resolve_sync_id(
     paths: &Paths,
-    profiles_index: &mut ProfilesIndex,
+    _profiles_index: &mut ProfilesIndex,
     tokens: &Tokens,
 ) -> Result<Option<String>, String> {
     let Ok((_, email, plan)) = require_identity(tokens) else {
@@ -1340,21 +1427,30 @@ pub(crate) fn resolve_sync_id(
     let Some(identity) = extract_profile_identity(tokens) else {
         return Ok(None);
     };
-    let (desired_base, desired, candidates) = desired_candidates(paths, &identity, &email, &plan)?;
-    if candidates.len() == 1 {
-        return Ok(candidates.first().cloned());
-    }
-    if candidates.iter().any(|id| id == &desired) {
+    let (_, desired, candidates) = desired_candidates(paths, &identity, &email, &plan)?;
+    let exact_candidates: Vec<String> = candidates
+        .iter()
+        .filter_map(|id| {
+            let path = profile_path_for_id(&paths.profiles, id);
+            read_tokens(&path)
+                .ok()
+                .filter(|candidate| candidate == tokens)
+                .map(|_| id.clone())
+        })
+        .collect();
+    if exact_candidates.iter().any(|id| id == &desired) {
         return Ok(Some(desired));
     }
-    let Some(primary) = pick_primary(&candidates) else {
-        return Ok(None);
-    };
-    if primary != desired {
-        let renamed = rename_profile_id(paths, profiles_index, &primary, &desired_base, &identity)?;
-        return Ok(Some(renamed));
+    if let Some(exact) = pick_primary(&exact_candidates) {
+        return Ok(Some(exact));
     }
-    Ok(Some(primary))
+    if candidates.len() > 1 {
+        // Several saved aliases have the same identity, but none contains the
+        // active token set. Choosing one by filename would overwrite an
+        // unrelated alias while preserving the active account.
+        return Err(AUTH_ERR_AMBIGUOUS_SAVED_PROFILES.to_string());
+    }
+    Ok(candidates.first().cloned())
 }
 
 pub(crate) fn cached_profile_ids(
@@ -1420,23 +1516,21 @@ fn sanitize_part(value: &str) -> String {
     let mut last_dash = false;
     for ch in value.chars() {
         let next = if ch.is_ascii_alphanumeric() {
-            Some(ch.to_ascii_lowercase())
+            ch.to_ascii_lowercase()
         } else if matches!(ch, '@' | '.' | '-' | '_' | '+') {
-            Some(ch)
+            ch
         } else {
-            Some('-')
+            '-'
         };
-        if let Some(next) = next {
-            if next == '-' {
-                if last_dash {
-                    continue;
-                }
-                last_dash = true;
-            } else {
-                last_dash = false;
+        if next == '-' {
+            if last_dash {
+                continue;
             }
-            out.push(next);
+            last_dash = true;
+        } else {
+            last_dash = false;
         }
+        out.push(next);
     }
     out.trim_matches('-').to_string()
 }
@@ -1547,15 +1641,104 @@ pub(crate) fn sync_current(paths: &Paths, index: &mut ProfilesIndex) -> Result<(
     Ok(())
 }
 
-fn sync_profile(paths: &Paths, target: &Path) -> Result<(), String> {
-    copy_atomic(&paths.auth, target).map_err(|err| crate::msg1(PROFILE_ERR_SYNC_CURRENT, err))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(target, fs::Permissions::from_mode(0o600))
-            .map_err(|err| crate::msg1(PROFILE_ERR_SYNC_CURRENT, err))?;
+fn revalidate_load_state(
+    paths: &Paths,
+    snapshot: &Snapshot,
+    selected_id: &str,
+    expected_active_tokens: &Option<Tokens>,
+    expected_active_auth: &Option<Vec<u8>>,
+) -> Result<(), String> {
+    ensure_file_auth_store(&paths.auth).map_err(|_| AUTH_ERR_REFRESH_STATE_CHANGED.to_string())?;
+    if read_auth_contents_opt(&paths.auth) != *expected_active_auth {
+        return Err(AUTH_ERR_REFRESH_STATE_CHANGED.to_string());
+    }
+    if read_tokens_opt(&paths.auth) != *expected_active_tokens {
+        return Err(AUTH_ERR_REFRESH_STATE_CHANGED.to_string());
+    }
+
+    let Some(Some(expected_selected_tokens)) = snapshot
+        .tokens
+        .get(selected_id)
+        .map(|result| result.as_ref().ok())
+    else {
+        return Err(AUTH_ERR_REFRESH_STATE_CHANGED.to_string());
+    };
+    let selected_path = profile_path_for_id(&paths.profiles, selected_id);
+    let selected_tokens =
+        read_tokens(&selected_path).map_err(|_| AUTH_ERR_REFRESH_STATE_CHANGED.to_string())?;
+    if selected_tokens != *expected_selected_tokens {
+        return Err(AUTH_ERR_REFRESH_STATE_CHANGED.to_string());
     }
     Ok(())
+}
+
+fn read_auth_contents_opt(path: &Path) -> Option<Vec<u8>> {
+    fs::read(path).ok()
+}
+
+fn sync_profile(paths: &Paths, target: &Path) -> Result<(), String> {
+    copy_atomic(&paths.auth, target).map_err(|err| crate::msg1(PROFILE_ERR_SYNC_CURRENT, err))
+}
+
+fn refresh_profile_tokens_for_status(
+    source_path: &Path,
+    tokens: &mut Tokens,
+) -> Result<(), String> {
+    let lock_paths = paths_for_profile_source(source_path)?;
+    let _lock = lock_usage(&lock_paths)?;
+    crate::auth::refresh_profile_tokens(source_path, tokens)
+}
+
+fn sync_profile_with_lock(
+    paths: &Paths,
+    target: &Path,
+    expected_active_tokens: &Tokens,
+    expected_target_tokens: Option<&Tokens>,
+) -> Result<(), String> {
+    let _lock = lock_usage(paths)?;
+
+    let active_tokens =
+        read_tokens(&paths.auth).map_err(|_| AUTH_ERR_REFRESH_STATE_CHANGED.to_string())?;
+    if active_tokens != *expected_active_tokens {
+        return Err(AUTH_ERR_REFRESH_STATE_CHANGED.to_string());
+    }
+
+    let target_tokens =
+        read_tokens(target).map_err(|_| AUTH_ERR_REFRESH_STATE_CHANGED.to_string())?;
+    if let Some(expected_target_tokens) = expected_target_tokens
+        && target_tokens != *expected_target_tokens
+    {
+        return Err(AUTH_ERR_REFRESH_STATE_CHANGED.to_string());
+    }
+    if extract_profile_identity(&target_tokens) != extract_profile_identity(expected_active_tokens)
+    {
+        return Err(AUTH_ERR_REFRESH_STATE_CHANGED.to_string());
+    }
+
+    sync_profile(paths, target)
+}
+
+fn paths_for_profile_source(source_path: &Path) -> Result<Paths, String> {
+    let parent = source_path
+        .parent()
+        .ok_or_else(|| AUTH_ERR_REFRESH_STATE_CHANGED.to_string())?;
+    let is_auth = source_path.file_name().and_then(|name| name.to_str()) == Some("auth.json");
+    let (codex, profiles) = if is_auth {
+        (parent.to_path_buf(), parent.join("profiles"))
+    } else {
+        let codex = parent
+            .parent()
+            .ok_or_else(|| AUTH_ERR_REFRESH_STATE_CHANGED.to_string())?;
+        (codex.to_path_buf(), parent.to_path_buf())
+    };
+    Ok(Paths {
+        auth: codex.join("auth.json"),
+        profiles_index: profiles.join("profiles.json"),
+        update_cache: profiles.join("update.json"),
+        profiles_lock: profiles.join("profiles.lock"),
+        codex,
+        profiles,
+    })
 }
 
 pub(crate) fn load_snapshot(paths: &Paths, strict_labels: bool) -> Result<Snapshot, String> {
@@ -1598,9 +1781,43 @@ pub(crate) fn current_saved_id(
     tokens_map: &BTreeMap<String, Result<Tokens, String>>,
 ) -> Option<String> {
     let tokens = read_tokens_opt(&paths.auth)?;
-    let identity = extract_profile_identity(&tokens)?;
+    pick_cached_profile_id(tokens_map, &tokens)
+}
+
+fn pick_cached_profile_id(
+    tokens_map: &BTreeMap<String, Result<Tokens, String>>,
+    tokens: &Tokens,
+) -> Option<String> {
+    let identity = extract_profile_identity(tokens)?;
     let candidates = cached_profile_ids(tokens_map, &identity);
-    pick_primary(&candidates)
+    candidates
+        .iter()
+        .filter_map(|id| {
+            tokens_map
+                .get(id)
+                .and_then(|result| result.as_ref().ok())
+                .filter(|candidate| *candidate == tokens)
+                .map(|_| id.clone())
+        })
+        .min()
+        .or_else(|| (candidates.len() == 1).then(|| candidates[0].clone()))
+}
+
+fn cached_profile_id_is_ambiguous(
+    tokens_map: &BTreeMap<String, Result<Tokens, String>>,
+    tokens: &Tokens,
+) -> bool {
+    let Some(identity) = extract_profile_identity(tokens) else {
+        return false;
+    };
+    let candidates = cached_profile_ids(tokens_map, &identity);
+    candidates.len() > 1
+        && !candidates.iter().any(|id| {
+            tokens_map
+                .get(id)
+                .and_then(|result| result.as_ref().ok())
+                .is_some_and(|candidate| candidate == tokens)
+        })
 }
 
 pub(crate) struct ProfileStore {
@@ -1612,7 +1829,9 @@ pub(crate) struct ProfileStore {
 impl ProfileStore {
     pub(crate) fn load(paths: &Paths) -> Result<Self, String> {
         let lock = lock_usage(paths)?;
-        let mut profiles_index = read_profiles_index_relaxed(paths);
+        let mut profiles_index = read_profiles_index(paths).map_err(|err| {
+            format!("{err} (run `doctor --fix` to repair profiles metadata before retrying)")
+        })?;
         let _ = prune_profiles_index(&mut profiles_index, &paths.profiles);
         let ids = collect_profile_ids(&paths.profiles)?;
         for id in &ids {
@@ -1719,14 +1938,7 @@ fn ordered_profile_ids(snapshot: &Snapshot, current_saved_id: Option<&str>) -> V
 
 fn copy_profile(source: &Path, dest: &Path, context: &str) -> Result<(), String> {
     copy_atomic(source, dest)
-        .map_err(|err| crate::msg3(PROFILE_ERR_COPY_CONTEXT, context, dest.display(), err))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(dest, fs::Permissions::from_mode(0o600))
-            .map_err(|err| crate::msg3(PROFILE_ERR_COPY_CONTEXT, context, dest.display(), err))?;
-    }
-    Ok(())
+        .map_err(|err| crate::msg3(PROFILE_ERR_COPY_CONTEXT, context, dest.display(), err))
 }
 
 fn make_candidates(paths: &Paths, snapshot: &Snapshot, ordered: &[String]) -> Vec<Candidate> {
@@ -1745,10 +1957,8 @@ fn pick_one(
         select_by_label(label, &snapshot.labels, candidates)
     } else if let Some(id) = id {
         select_by_id(id, candidates)
-    } else if !io::stdin().is_terminal() {
-        require_tty(action)?;
-        unreachable!("require_tty should always return Err in non-interactive mode")
     } else {
+        require_tty(action)?;
         select_single_profile("", candidates)
     }
 }
@@ -2063,6 +2273,104 @@ fn render_entries(entries: &[Entry], ctx: &ListCtx, allow_plain_spacing: bool) -
     lines
 }
 
+fn render_compact_entries(entries: &[Entry], ctx: &ListCtx) -> Vec<String> {
+    let mut lines = Vec::with_capacity(entries.len().max(1) * 3);
+    for (index, entry) in entries.iter().enumerate() {
+        let mut header = format_entry_header(&entry.display, ctx.use_color);
+        if ctx.show_current_marker && entry.is_current {
+            header.push_str(&current_profile_marker(ctx.use_color));
+        }
+        lines.push(header);
+
+        for warning in &entry.warnings {
+            append_compact_detail(&mut lines, warning, 2);
+        }
+
+        match entry.usage.as_ref() {
+            Some(usage) if usage.state == "ok" => {
+                if usage.buckets.is_empty() {
+                    lines.push("  Usage unavailable".to_string());
+                } else {
+                    for bucket in &usage.buckets {
+                        lines.push(format_compact_bucket(bucket, ctx.now));
+                    }
+                }
+            }
+            Some(usage) => {
+                let summary = entry
+                    .error_summary
+                    .as_deref()
+                    .or(usage.summary.as_deref())
+                    .unwrap_or("Usage unavailable");
+                append_compact_detail(&mut lines, summary, 2);
+                if let Some(detail) = usage.detail.as_deref() {
+                    append_compact_detail(&mut lines, detail, 4);
+                }
+            }
+            None => {
+                if let Some(summary) = entry.error_summary.as_deref() {
+                    append_compact_detail(&mut lines, summary, 2);
+                } else {
+                    lines.push("  Usage unavailable".to_string());
+                }
+            }
+        }
+
+        if index + 1 < entries.len() {
+            lines.push(String::new());
+        }
+    }
+    lines
+}
+
+fn append_compact_detail(lines: &mut Vec<String>, text: &str, indent: usize) {
+    let prefix = " ".repeat(indent);
+    let text = crate::sanitize_for_terminal(text);
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        lines.push(format!("{prefix}{line}"));
+    }
+}
+
+fn format_compact_bucket(
+    bucket: &crate::usage::UsageSnapshotBucket,
+    now: DateTime<Local>,
+) -> String {
+    let label = crate::sanitize_for_terminal(&bucket.label);
+    let windows = [bucket.primary.as_ref(), bucket.secondary.as_ref()]
+        .into_iter()
+        .flatten()
+        .map(|window| format_compact_window(window, now))
+        .collect::<Vec<_>>();
+    if windows.is_empty() {
+        return format!("  {label}: unavailable");
+    }
+    format!("  {label}: {}", windows.join("; "))
+}
+
+fn format_compact_window(
+    window: &crate::usage::UsageSnapshotWindow,
+    now: DateTime<Local>,
+) -> String {
+    let duration = format_window_duration(window.window_seconds);
+    let reset = crate::usage::format_reset_timestamp(window.reset_at, now)
+        .unwrap_or_else(|| "unknown".to_string());
+    format!("{duration} {}% left (resets {reset})", window.left_percent)
+}
+
+fn format_window_duration(seconds: i64) -> String {
+    if seconds > 0 && seconds % 86_400 == 0 {
+        format!("{}d", seconds / 86_400)
+    } else if seconds > 0 && seconds % 3_600 == 0 {
+        format!("{}h", seconds / 3_600)
+    } else if seconds > 0 && seconds % 60 == 0 {
+        format!("{}m", seconds / 60)
+    } else if seconds > 0 {
+        format!("{seconds}s")
+    } else {
+        "unknown window".to_string()
+    }
+}
+
 fn render_entry_details(entry: &Entry) -> Vec<String> {
     let mut details = Vec::new();
     for line in &entry.details {
@@ -2205,6 +2513,9 @@ struct StatusUsageJson {
 
 impl StatusUsageJson {
     fn ok(buckets: Vec<crate::usage::UsageSnapshotBucket>) -> Self {
+        if buckets.is_empty() {
+            return Self::unavailable(usage_unavailable());
+        }
         Self {
             state: "ok",
             buckets,
@@ -2296,12 +2607,14 @@ fn detail_lines(
         let Some(base_url) = ctx.base_url.as_deref() else {
             return (Vec::new(), None, None, false);
         };
-        let Some(access_token) = access_token.as_deref() else {
-            return (Vec::new(), None, None, false);
-        };
-        let Some(account_id) = initial_account_id.as_deref() else {
-            return (Vec::new(), None, None, false);
-        };
+        // `profile_error` above rejects missing access/account credentials,
+        // except for identity-only profiles where `missing_access` is false.
+        let access_token = access_token
+            .as_deref()
+            .expect("validated account profile has an access token");
+        let account_id = initial_account_id
+            .as_deref()
+            .expect("validated account profile has an account id");
         match crate::usage::fetch_usage_status(
             base_url,
             access_token,
@@ -2311,28 +2624,18 @@ fn detail_lines(
         ) {
             Ok((details, buckets)) => (details, None, Some(StatusUsageJson::ok(buckets)), false),
             Err(err) if err.status_code() == Some(401) => {
-                match crate::auth::refresh_profile_tokens(source_path, tokens) {
+                match refresh_profile_tokens_for_status(source_path, tokens) {
                     Ok(()) => {
-                        let Some(access_token) = tokens.access_token.as_deref() else {
-                            let message = AUTH_ERR_INCOMPLETE_ACCOUNT;
-                            return (
-                                vec![format_error(message)],
-                                Some(error_summary(PROFILE_SUMMARY_AUTH_ERROR, message)),
-                                Some(StatusUsageJson::from_message("error", None, message)),
-                                true,
-                            );
-                        };
-                        let Some(account_id) =
-                            token_account_id(tokens).or(initial_account_id.as_deref())
-                        else {
-                            let message = AUTH_ERR_INCOMPLETE_ACCOUNT;
-                            return (
-                                vec![format_error(message)],
-                                Some(error_summary(PROFILE_SUMMARY_AUTH_ERROR, message)),
-                                Some(StatusUsageJson::from_message("error", None, message)),
-                                true,
-                            );
-                        };
+                        // A successful refresh validates a nonempty access token;
+                        // the original account id is also still available as a
+                        // fallback if the refreshed response omits one.
+                        let access_token = tokens
+                            .access_token
+                            .as_deref()
+                            .expect("validated refresh response has an access token");
+                        let account_id = token_account_id(tokens)
+                            .or(initial_account_id.as_deref())
+                            .expect("validated account profile has an account id");
                         match crate::usage::fetch_usage_status(
                             base_url,
                             access_token,
@@ -2478,7 +2781,7 @@ fn make_entries(
         if workers <= 1 {
             return ordered.iter().map(build).collect();
         }
-        if let Ok(pool) = rayon::ThreadPoolBuilder::new().num_threads(workers).build() {
+        if let Some(pool) = build_usage_pool(workers) {
             let mut indexed: Vec<(usize, Entry)> = pool.install(|| {
                 ordered
                     .par_iter()
@@ -2493,6 +2796,17 @@ fn make_entries(
     }
 
     ordered.iter().map(build).collect()
+}
+
+fn build_usage_pool(workers: usize) -> Option<rayon::ThreadPool> {
+    #[cfg(test)]
+    if FORCE_USAGE_POOL_FALLBACK.with(Cell::get) {
+        return None;
+    }
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .build()
+        .ok()
 }
 
 fn usage_concurrency() -> usize {
@@ -2528,11 +2842,25 @@ fn make_current(
             ));
         }
     };
-    let resolved_saved_id = extract_profile_identity(&tokens).and_then(|identity| {
-        let candidates = cached_profile_ids(tokens_map, &identity);
-        pick_primary(&candidates)
+    let ambiguous_saved_id = cached_profile_id_is_ambiguous(tokens_map, &tokens);
+    let resolved_saved_id = pick_cached_profile_id(tokens_map, &tokens);
+    // The auth file is the fresh source of truth. A snapshot hint can only be
+    // used when its cached profile still has the same identity; otherwise a
+    // concurrent load could make us sync account B into saved profile A.
+    let fresh_identity = extract_profile_identity(&tokens);
+    let effective_saved_id = (!ambiguous_saved_id).then_some(()).and_then(|_| {
+        resolved_saved_id.as_deref().or_else(|| {
+            current_saved_id.filter(|id| {
+                let Some(Ok(candidate)) = tokens_map.get(*id) else {
+                    return false;
+                };
+                match (fresh_identity.as_ref(), extract_profile_identity(candidate)) {
+                    (Some(fresh), Some(candidate)) => fresh == &candidate,
+                    _ => false,
+                }
+            })
+        })
     });
-    let effective_saved_id = current_saved_id.or(resolved_saved_id.as_deref());
     let label = effective_saved_id.and_then(|id| label_for_id(labels, id));
     let use_color = ctx.use_color;
     let label_value = label.clone();
@@ -2550,7 +2878,10 @@ fn make_current(
     );
     if refreshed && let Some(saved_id) = effective_saved_id {
         let target = profile_path_for_id(&ctx.profiles_dir, saved_id);
-        if let Err(err) = sync_profile(paths, &target) {
+        let expected_target_tokens = tokens_map
+            .get(saved_id)
+            .and_then(|result| result.as_ref().ok());
+        if let Err(err) = sync_profile_with_lock(paths, &target, &tokens, expected_target_tokens) {
             details = vec![format_error(&err)];
             summary = Some(error_summary(PROFILE_SUMMARY_ERROR, &err));
             usage = Some(StatusUsageJson::from_message("error", None, &err));
@@ -2713,7 +3044,7 @@ fn print_list_json(entries: &[Entry]) -> Result<(), String> {
         })
         .collect();
     let json = serde_json::to_string_pretty(&ListedProfiles { profiles })
-        .map_err(|err| crate::msg1(PROFILE_ERR_SERIALIZE_INDEX, err))?;
+        .expect("listed profile JSON is serializable");
     println!("{json}");
     Ok(())
 }
@@ -2857,8 +3188,7 @@ fn status_profile_json(entry: Entry) -> StatusProfileJson {
 
 fn print_current_status_json(current: Option<Entry>) -> Result<(), String> {
     let payload = current.map(status_profile_json);
-    let json = serde_json::to_string_pretty(&payload)
-        .map_err(|err| crate::msg1(PROFILE_ERR_SERIALIZE_INDEX, err))?;
+    let json = serde_json::to_string_pretty(&payload).expect("current status JSON is serializable");
     println!("{json}");
     Ok(())
 }
@@ -2867,8 +3197,7 @@ fn print_all_status_json(profiles: Vec<Entry>) -> Result<(), String> {
     let payload = AllStatusJson {
         profiles: profiles.into_iter().map(status_profile_json).collect(),
     };
-    let json = serde_json::to_string_pretty(&payload)
-        .map_err(|err| crate::msg1(PROFILE_ERR_SERIALIZE_INDEX, err))?;
+    let json = serde_json::to_string_pretty(&payload).expect("all status JSON is serializable");
     println!("{json}");
     Ok(())
 }
@@ -2899,11 +3228,29 @@ fn is_profile_file(path: &Path) -> bool {
     if ext != "json" {
         return false;
     }
-    !matches!(
-        path.file_name().and_then(|name| name.to_str()),
-        Some("profiles.json" | "update.json")
-    )
+    !path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.eq_ignore_ascii_case("profiles.json") || name.eq_ignore_ascii_case("update.json")
+        })
 }
+
+#[cfg(test)]
+#[path = "profiles/render_tests.rs"]
+mod render_tests;
+
+#[cfg(test)]
+#[path = "profiles/storage_tests.rs"]
+mod storage_tests;
+
+#[cfg(test)]
+#[path = "profiles/transition_tests.rs"]
+mod transition_tests;
+
+#[cfg(test)]
+#[path = "profiles/import_tests.rs"]
+mod import_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3191,6 +3538,80 @@ mod tests {
             .insert("missing".to_string(), ProfileIndexEntry::default());
         prune_profiles_index(&mut index, &paths.profiles).unwrap();
         assert!(index.profiles.is_empty());
+    }
+
+    #[test]
+    fn load_preserves_active_auth_when_current_profile_sync_fails() {
+        for force in [false, true] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let paths = make_paths(dir.path());
+            crate::ensure_paths(&paths).unwrap();
+
+            write_auth(
+                &paths.auth,
+                "acct-alpha",
+                "alpha@example.com",
+                "team",
+                "alpha-access",
+                "alpha-refresh",
+            );
+            save_profile(&paths, Some("alpha".to_string()), false).unwrap();
+            write_auth(
+                &paths.auth,
+                "acct-beta",
+                "beta@example.com",
+                "team",
+                "beta-access",
+                "beta-refresh",
+            );
+            save_profile(&paths, Some("beta".to_string()), false).unwrap();
+            let before = fs::read(&paths.auth).unwrap();
+
+            let _failure = crate::common::FailpointGuard::new(crate::common::FAIL_WRITE_RENAME, 1);
+            let result = load_profile(&paths, Some("alpha".to_string()), None, force, false, false);
+            let error = result.unwrap_err();
+            assert!(error.contains("failpoint"));
+            assert_eq!(fs::read(&paths.auth).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn selected_status_rejects_a_stale_current_profile_hint() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = make_paths(dir.path());
+        crate::ensure_paths(&paths).unwrap();
+        write_auth(
+            &paths.auth,
+            "acct-beta",
+            "beta@example.com",
+            "team",
+            "beta-access",
+            "beta-refresh",
+        );
+
+        let mut tokens_map = BTreeMap::new();
+        tokens_map.insert(
+            "alpha".to_string(),
+            Ok(make_tokens("acct-alpha", "alpha@example.com", "team")),
+        );
+        tokens_map.insert(
+            "beta".to_string(),
+            Ok(make_tokens("acct-beta", "beta@example.com", "team")),
+        );
+        let ctx = ListCtx::new(&paths, false, false, false);
+
+        let result = make_selected_current_entry(
+            &paths,
+            "alpha",
+            Some("alpha"),
+            &Labels::new(),
+            &tokens_map,
+            &ctx,
+        );
+        let error = result
+            .err()
+            .expect("stale current profile hint was accepted");
+        assert_eq!(error, AUTH_ERR_REFRESH_STATE_CHANGED);
     }
 
     #[test]
@@ -3494,8 +3915,8 @@ mod tests {
         crate::ensure_paths(&paths).unwrap();
         save_profile(&paths, Some("team".to_string()), false).unwrap();
         list_profiles(&paths, false, false).unwrap();
-        status_profiles(&paths, false, None, None, false).unwrap();
-        status_profiles(&paths, true, None, None, false).unwrap();
+        status_profiles(&paths, false, false, None, None, false).unwrap();
+        status_profiles(&paths, true, false, None, None, false).unwrap();
     }
 
     #[test]

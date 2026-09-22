@@ -32,13 +32,15 @@ jobs:
       - id: release
         name: Resolve release tag
         shell: bash
+        env:
+          RELEASE_INPUT_TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
 
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             tag="${GITHUB_REF_NAME}"
           else
-            tag="${{ inputs.tag }}"
+            tag="${RELEASE_INPUT_TAG}"
           fi
 
           [[ -n "${tag}" ]] || { echo "Missing release tag"; exit 1; }
@@ -93,13 +95,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7
         with:
           toolchain: 1.94.0
-          components: rustfmt, clippy
+          components: rustfmt, clippy, llvm-tools-preview
       - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
         with:
           tool: cargo-audit@0.22.1
       - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
         with:
-          tool: cargo-nextest@0.9.129
+          tool: cargo-llvm-cov@0.9.1
       - name: Cache cargo bin
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         continue-on-error: true
@@ -113,7 +115,9 @@ jobs:
         with:
           shared-key: ${{ runner.os }}-verify-${{ hashFiles('rust-toolchain.toml') }}
       - name: Run checks
-        run: scripts/check.sh
+        run: scripts/check.sh --no-tests
+      - name: Require complete line coverage before building release artifacts
+        run: make coverage
 
   build:
     needs: [tag-check, verify]

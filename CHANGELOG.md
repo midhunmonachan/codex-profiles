@@ -7,12 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `status --all --compact` groups short usage and reset-time summaries by account
+  and usage bucket, including accounts with unavailable usage or errors.
+- `doctor` reports local Codex configuration compatibility without displaying
+  configuration secrets or modifying `config.toml`.
+- Status JSON preserves upstream `primary` and `secondary` windows, each with
+  its actual `window_seconds`, remaining percentage, and reset timestamp.
+- Real-terminal regression tests cover account switching, cancellation, deletion,
+  and files changing while a confirmation prompt is open.
+
+### Changed
+
+- Raise the required Rust line coverage from 90% to 100% locally and in CI.
+
 ### Fixed
 
+- Preserve the active account before switching and refuse stale refresh writes
+  when authentication changes during a request.
+- Refresh selected active accounts through the active auth file and preserve
+  their rotated tokens in the saved account profile.
+- Preserve the stored `account_id` during refresh, matching Codex's pinned
+  account identity so a new `id_token` account claim cannot silently select a
+  different saved account.
+- Prefer exact token snapshots when syncing duplicate account aliases; allow a
+  sole alias to absorb token rotation, fail closed when multiple aliases have
+  no exact active snapshot, and keep status from overwriting an ambiguous alias.
+- Reject case-insensitive reserved and duplicate import IDs before writing profiles,
+  including aliases that collide on Windows filesystems.
+- Apply Codex auth-mode precedence to imports, rejecting unsupported credential
+  modes before writing imported profiles or index metadata.
+- Report weekly-only and custom-duration usage windows accurately. The existing
+  `five_hour` and `weekly` JSON aliases now match only those exact durations.
+- Report empty usage responses as unavailable and stop retrying when the service
+  requests a delay beyond the interactive retry budget.
+- Remove temporary credential files after failed atomic writes, preserve the
+  existing destination on replacement failure, and set private Unix permissions
+  before publishing copied credentials.
+- Refuse mutations when the profile index is malformed, preserving metadata for
+  explicit recovery with `doctor --fix`.
+- Preserve executable permissions in native release archives and verify artifact
+  hashes, expected contents, and permissions before publishing.
 - `--version` and `-V` now print to stdout and exit successfully.
 - Keep Cargo.lock in sync when the release helper bumps the version.
 - Test built binaries and npm packages before publishing, including version/help
   exit codes and profile switching.
+
+### Documentation
+
+- Explain account profiles versus native Codex configuration profiles, record the
+  September 22 upstream source review, and document usage JSON compatibility.
 
 ## [0.3.2] - 2026-09-15
 
