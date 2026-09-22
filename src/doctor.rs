@@ -892,7 +892,9 @@ mod tests {
         assert!(matches!(check.level, Level::Error));
     }
 
-    #[cfg(unix)]
+    // Linux permits arbitrary byte sequences in directory entries; macOS
+    // rejects this fixture before the doctor code can inspect it.
+    #[cfg(target_os = "linux")]
     #[test]
     fn saved_profiles_use_a_safe_fallback_for_non_utf8_names() {
         use std::os::unix::ffi::OsStringExt;
