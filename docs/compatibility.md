@@ -138,11 +138,11 @@ Never paste tokens, exported profiles, or `auth.json` into a bug report. Useful
 diagnostics are client/tool versions, OS, storage mode, whether `CODEX_HOME` is
 customized, the command, and a redacted error.
 
-Source checked September 22, 2026: [OpenAI authentication documentation](https://learn.chatgpt.com/docs/auth)
+Source checked September 24, 2026: [OpenAI authentication documentation](https://learn.chatgpt.com/docs/auth)
 and [app-server rate-limit documentation](https://learn.chatgpt.com/docs/app-server).
 
 Implementation cross-check: `openai/codex` revision
-[`94174e44cbc54cece45f6052328ca0c2cd7a8a2a`](https://github.com/openai/codex/tree/94174e44cbc54cece45f6052328ca0c2cd7a8a2a),
+[`a33fb9751c1e468b0062aae63e8f06e9d75e2376`](https://github.com/openai/codex/tree/a33fb9751c1e468b0062aae63e8f06e9d75e2376),
 specifically `codex-rs/utils/home-dir/src/lib.rs`, `codex-rs/config/src/types.rs`,
 `codex-rs/login/src/auth/storage.rs`, `codex-rs/login/src/auth/manager.rs`, and
 `codex-rs/protocol/src/auth.rs`, and `codex-rs/backend-client/src/client.rs`.
@@ -150,3 +150,6 @@ The `_mode` suffix is an internal Rust field;
 the public TOML key does not have that suffix. Authentication mode precedence and
 the OAuth refresh request fields follow this source. External-host tokens are
 ephemeral upstream and are deliberately rejected rather than treated as refreshable OAuth profiles.
+The current source also has agent-identity, personal-access-token, externally
+supplied headers, and Bedrock modes; these remain outside the file-backed profile
+boundary and are rejected before profile data is read or written.

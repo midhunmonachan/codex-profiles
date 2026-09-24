@@ -1,7 +1,7 @@
 # Next-version research and release scope
 
-Reviewed September 22, 2026. Project baseline: [`879e538`](https://github.com/midhunmonachan/codex-profiles/commit/879e538ca3d007768fe1c710add0f8ee573d918d), after v0.3.2.
-Upstream comparison: [`openai/codex` at `94174e44`](https://github.com/openai/codex/tree/94174e44cbc54cece45f6052328ca0c2cd7a8a2a).
+Reviewed September 24, 2026. Project baseline: [`879e538`](https://github.com/midhunmonachan/codex-profiles/commit/879e538ca3d007768fe1c710add0f8ee573d918d), after v0.3.2.
+Upstream comparison: [`openai/codex` at `a33fb975`](https://github.com/openai/codex/tree/a33fb9751c1e468b0062aae63e8f06e9d75e2376).
 
 The next release combines account-switching reliability with clearer usage
 reporting. It keeps account credentials separate from Codex configuration.
@@ -26,6 +26,13 @@ Refresh protection is cooperative between Codex Profiles processes. Codex itself
 does not acquire this tool's profile lock. Continue to finish active client work
 before switching, and restart the affected client afterward; tests with synthetic
 credentials do not establish live desktop or keyring compatibility.
+
+The September 24 review found no change to the file-backed auth, token,
+home-directory, or rate-limit contracts consumed by this release. Current Codex
+also supports newer authentication modes such as agent identity, personal access
+tokens, externally provided headers, and Bedrock credentials; this project
+continues to reject those modes before reading or writing a profile because their
+storage and refresh lifecycles are outside its supported boundary.
 
 ## Upstream contracts
 
