@@ -44,6 +44,10 @@ downloaded; otherwise the checker also reports missing files for other platforms
 `release-manifest.json` records the release version, tag, commit SHA, tool
 versions, and the same per-asset hashes from `SHA256SUMS`.
 
+The release workflow also checks that each archive contains the expected
+executable bytes, npm packages declare the matching platform metadata and
+binary layout, and the Homebrew cask points to the matching Darwin archives.
+
 ## Verify GitHub attestations
 
 Use the GitHub CLI to verify a release asset attestation:

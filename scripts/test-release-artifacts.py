@@ -22,6 +22,15 @@ targets = {
     "x86_64-pc-windows-msvc": "codex-profiles-win32-x64",
     "x86_64-unknown-linux-gnu": "codex-profiles-linux-x64",
 }
+platforms = {
+    target: {
+        "package": package,
+        "os": "win32" if "windows" in target else ("darwin" if "apple" in target else "linux"),
+        "cpu": "arm64" if target.startswith("aarch64") else "x64",
+        "binary": "codex-profiles.exe" if "windows" in target else "codex-profiles",
+    }
+    for target, package in targets.items()
+}
 
 
 def clear_directory(path: Path) -> None:
@@ -32,7 +41,13 @@ def clear_directory(path: Path) -> None:
             child.unlink()
 
 
-def write_tar(path: Path, mode: int, extra: bool = False, symlink: bool = False) -> None:
+def write_tar(
+    path: Path,
+    mode: int,
+    payload: bytes,
+    extra: bool = False,
+    symlink: bool = False,
+) -> None:
     with tarfile.open(path, "w:gz") as archive:
         member = tarfile.TarInfo("codex-profiles")
         member.mode = mode
@@ -41,7 +56,6 @@ def write_tar(path: Path, mode: int, extra: bool = False, symlink: bool = False)
             member.linkname = "somewhere-else"
             archive.addfile(member)
         else:
-            payload = b"synthetic executable\n"
             member.size = len(payload)
             archive.addfile(member, io.BytesIO(payload))
         if extra:
@@ -51,16 +65,32 @@ def write_tar(path: Path, mode: int, extra: bool = False, symlink: bool = False)
             archive.addfile(extra_member, io.BytesIO(extra_payload))
 
 
-def write_zip(path: Path, extra: bool = False, symlink: bool = False) -> None:
+def write_zip(
+    path: Path,
+    payload: bytes,
+    extra: bool = False,
+    symlink: bool = False,
+) -> None:
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
         member = zipfile.ZipInfo("codex-profiles.exe")
         if symlink:
             member.external_attr = (stat.S_IFLNK | 0o777) << 16
             archive.writestr(member, b"somewhere-else")
         else:
-            archive.writestr(member, b"synthetic executable\n")
+            archive.writestr(member, payload)
         if extra:
             archive.writestr("unexpected", b"unexpected\n")
+
+
+def write_npm_package(path: Path, metadata: dict, files: dict[str, bytes]) -> None:
+    with tarfile.open(path, "w:gz") as archive:
+        package_json = json.dumps(metadata, separators=(",", ":")).encode()
+        entries = {"package/package.json": package_json, **files}
+        for name, payload in entries.items():
+            member = tarfile.TarInfo(name)
+            member.size = len(payload)
+            member.mode = 0o755 if name.startswith("package/bin/") else 0o644
+            archive.addfile(member, io.BytesIO(payload))
 
 
 def build_fixture(
@@ -84,32 +114,90 @@ def build_fixture(
 
     generated = []
     for target, package_name in targets.items():
+        platform = platforms[target]
         artifact_dir = artifacts / f"codex-profiles-{target}"
         artifact_dir.mkdir()
-        binary_name = "codex-profiles.exe" if "windows" in target else "codex-profiles"
-        (artifact_dir / binary_name).write_bytes(b"synthetic executable\n")
+        binary_name = platform["binary"]
+        payload = f"synthetic executable for {target}\n".encode()
+        (artifact_dir / binary_name).write_bytes(payload)
         if "windows" in target:
             archive = release / f"codex-profiles-{target}.exe.zip"
-            write_zip(archive, extra=zip_extra, symlink=zip_symlink)
+            write_zip(archive, payload, extra=zip_extra, symlink=zip_symlink)
         else:
             archive = release / f"codex-profiles-{target}.tar.gz"
-            write_tar(archive, mode, extra=tar_extra, symlink=tar_symlink)
+            write_tar(archive, mode, payload, extra=tar_extra, symlink=tar_symlink)
         generated.append(archive)
 
         package = npm_packages / f"{package_name}-{version}.tgz"
-        package.write_bytes(f"synthetic {package_name}\n".encode())
+        metadata = {
+            "name": package_name,
+            "version": version,
+            "os": [platform["os"]],
+            "cpu": [platform["cpu"]],
+        }
+        write_npm_package(
+            package,
+            metadata,
+            {f"package/bin/{binary_name}": payload},
+        )
         generated.append(package)
 
     main_package = npm_packages / f"codex-profiles-{version}.tgz"
-    main_package.write_bytes(b"synthetic main package\n")
+    main_metadata = {
+        "name": "codex-profiles",
+        "version": version,
+        "bin": {"codex-profiles": "bin/codex-profiles.js"},
+        "optionalDependencies": {
+            package_name: version for package_name in targets.values()
+        },
+    }
+    write_npm_package(
+        main_package,
+        main_metadata,
+        {
+            "package/bin/codex-profiles.js": b"#!/usr/bin/env node\n",
+            "package/LICENSE": b"MIT\n",
+            "package/README.md": b"# Codex Profiles\n",
+        },
+    )
     generated.append(main_package)
 
     crate = cargo / f"codex-profiles-{version}.crate"
     crate.write_bytes(b"synthetic cargo crate\n")
     generated.append(crate)
 
+    darwin_archives = {
+        "arm64": release / "codex-profiles-aarch64-apple-darwin.tar.gz",
+        "x64": release / "codex-profiles-x86_64-apple-darwin.tar.gz",
+    }
+    darwin_shas = {
+        arch: sha256(path.read_bytes()).hexdigest()
+        for arch, path in darwin_archives.items()
+    }
     cask = homebrew / "codex-profiles.rb"
-    cask.write_text('cask "codex-profiles" do\nend\n', encoding="utf-8")
+    cask.write_text(
+        f'''cask "codex-profiles" do
+  version "{version}"
+
+  on_arm do
+    sha256 "{darwin_shas["arm64"]}"
+    url "https://github.com/midhunmonachan/codex-profiles/releases/download/v#{{version}}/codex-profiles-aarch64-apple-darwin.tar.gz"
+  end
+
+  on_intel do
+    sha256 "{darwin_shas["x64"]}"
+    url "https://github.com/midhunmonachan/codex-profiles/releases/download/v#{{version}}/codex-profiles-x86_64-apple-darwin.tar.gz"
+  end
+
+  name "Codex Profiles"
+  desc "Seamlessly switch between multiple Codex accounts"
+  homepage "https://github.com/midhunmonachan/codex-profiles"
+
+  binary "codex-profiles"
+end
+''',
+        encoding="utf-8",
+    )
     generated.append(cask)
 
     digests = {path.name: sha256(path.read_bytes()).hexdigest() for path in generated}
@@ -140,6 +228,41 @@ def build_fixture(
     (checksums / "release-manifest.json").write_text(
         json.dumps(manifest) + "\n", encoding="utf-8"
     )
+
+
+def refresh_integrity(out: Path) -> None:
+    directories = (
+        out / "release",
+        out / "npm-packages",
+        out / "cargo",
+        out / "homebrew",
+    )
+    files = [path for directory in directories for path in sorted(directory.iterdir())]
+    digests = {path.name: sha256(path.read_bytes()).hexdigest() for path in files}
+    checksums = out / "checksums" / "SHA256SUMS"
+    checksums.write_text(
+        "".join(f"{digest}  {name}\n" for name, digest in digests.items()),
+        encoding="utf-8",
+    )
+    manifest_path = out / "checksums" / "release-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for artifact in manifest["artifacts"]:
+        artifact["sha256"] = digests[artifact["path"]]
+    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+
+
+def rewrite_package_json(path: Path, update) -> None:
+    temporary = path.with_suffix(".tmp.tgz")
+    with tarfile.open(path, "r:gz") as source, tarfile.open(temporary, "w:gz") as destination:
+        for member in source.getmembers():
+            payload = source.extractfile(member).read()
+            if member.name == "package/package.json":
+                metadata = json.loads(payload)
+                update(metadata)
+                payload = json.dumps(metadata, separators=(",", ":")).encode()
+            member.size = len(payload)
+            destination.addfile(member, io.BytesIO(payload))
+    temporary.replace(path)
 
 
 def verify(out: Path) -> subprocess.CompletedProcess[str]:
@@ -218,4 +341,90 @@ with tempfile.TemporaryDirectory(prefix="release-artifacts-test-", dir=target) a
     missing_package.unlink()
     assert_fail(out, "Missing npm platform package")
 
-print("PASS: release completeness, archive permissions/types, and checksum verification")
+    build_fixture(out)
+    archive = out / "release" / "codex-profiles-x86_64-unknown-linux-gnu.tar.gz"
+    write_tar(archive, 0o755, b"wrong target payload\n")
+    refresh_integrity(out)
+    assert_fail(out, "payload does not match downloaded artifact")
+
+    build_fixture(out)
+    platform_package = (
+        out / "npm-packages" / f"{targets['x86_64-unknown-linux-gnu']}-{version}.tgz"
+    )
+    rewrite_package_json(
+        platform_package,
+        lambda metadata: metadata.update({"name": "wrong-platform-package"}),
+    )
+    refresh_integrity(out)
+    assert_fail(out, "NPM platform package name mismatch")
+
+    build_fixture(out)
+    rewrite_package_json(
+        platform_package,
+        lambda metadata: metadata.update({"os": ["darwin"]}),
+    )
+    refresh_integrity(out)
+    assert_fail(out, "NPM platform package OS mismatch")
+
+    build_fixture(out)
+    rewrite_package_json(
+        platform_package,
+        lambda metadata: metadata.update({"cpu": ["arm64"]}),
+    )
+    refresh_integrity(out)
+    assert_fail(out, "NPM platform package CPU mismatch")
+
+    build_fixture(out)
+    main_package = out / "npm-packages" / f"codex-profiles-{version}.tgz"
+    rewrite_package_json(
+        main_package,
+        lambda metadata: metadata.update({"bin": {"wrong": "bin/wrong.js"}}),
+    )
+    refresh_integrity(out)
+    assert_fail(out, "NPM main package bin layout mismatch")
+
+    build_fixture(out)
+    cask = out / "homebrew" / "codex-profiles.rb"
+    cask.write_text(
+        cask.read_text(encoding="utf-8").replace(
+            f'version "{version}"', 'version "9.9.9"'
+        ),
+        encoding="utf-8",
+    )
+    refresh_integrity(out)
+    assert_fail(out, "Homebrew cask version mismatch")
+
+    build_fixture(out)
+    cask = out / "homebrew" / "codex-profiles.rb"
+    cask.write_text(
+        cask.read_text(encoding="utf-8").replace(
+            "codex-profiles-aarch64-apple-darwin.tar.gz",
+            "codex-profiles-x86_64-unknown-linux-gnu.tar.gz",
+            1,
+        ),
+        encoding="utf-8",
+    )
+    refresh_integrity(out)
+    assert_fail(out, "Homebrew cask URL mismatch")
+
+    build_fixture(out)
+    cask = out / "homebrew" / "codex-profiles.rb"
+    cask.write_text(
+        cask.read_text(encoding="utf-8").replace(
+            next(
+                line.split('"')[1]
+                for line in cask.read_text(encoding="utf-8").splitlines()
+                if line.strip().startswith("sha256 ")
+            ),
+            "0" * 64,
+            1,
+        ),
+        encoding="utf-8",
+    )
+    refresh_integrity(out)
+    assert_fail(out, "Homebrew cask SHA mismatch")
+
+print(
+    "PASS: release completeness, package metadata/layout, archive payloads, "
+    "Homebrew metadata, and checksum verification"
+)
