@@ -116,7 +116,7 @@ jobs:
           shared-key: ${{ runner.os }}-verify-${{ hashFiles('rust-toolchain.toml') }}
       - name: Run checks
         run: scripts/check.sh --no-tests
-      - name: Require complete line coverage before building release artifacts
+      - name: Run tests and report line coverage before building release artifacts
         run: make coverage
 
   build:

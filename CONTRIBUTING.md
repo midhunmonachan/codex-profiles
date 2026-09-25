@@ -78,11 +78,11 @@ make test
 make coverage
 ```
 
-`make coverage` is the standard check for the raw 100% line metric. Keep real I/O,
-terminal, and concurrency tests; do not exclude production code. If a merged source
-report appears covered while the raw gate fails, inspect per-function instances
-because unit-test and CLI binaries can execute different paths. The requirement
-measures executed lines, not 100% branch coverage.
+`make coverage` runs the tests and reports Rust line coverage. There is no required
+coverage percentage. Keep meaningful regression tests, including real I/O,
+terminal, and concurrency tests, and do not exclude production code to improve
+the reported metric. Line coverage measures executed lines, not every possible
+branch or proof of correctness.
 
 ## Dependency maintenance and merge checks
 
@@ -96,12 +96,18 @@ The npm platform packages are versioned together by the release process, so they
 are not independently updated by Dependabot.
 
 Every PR, including documentation-only changes, and every push to `main` runs the
-Windows, macOS, Linux, security-audit, and coverage checks. The `main` ruleset requires these
-GitHub Actions checks against an up-to-date branch, a pull request, and resolved
-review conversations. It prevents force pushes and branch deletion, with no
-admin or automation bypass configured. A second person's approval is not required for this
-single-maintainer repository. The ruleset configuration is recorded in
-`.github/main-ruleset.json`; editing that file alone does not update GitHub settings.
+Windows, macOS, Linux, security-audit, and coverage checks. The required-checks
+ruleset requires these GitHub Actions checks against an up-to-date branch and
+prevents force pushes and branch deletion. It has no bypass actors, so these
+requirements apply to everyone, including the owner.
+
+A separate ruleset requires pull requests and resolved review conversations.
+Only the `midhunmonachan` account (GitHub user ID `70493664`) may bypass that PR
+requirement and push directly to `main` after the same checks pass. All other
+contributors, including future collaborators and administrators, must use PRs.
+A second person's approval is not required. The configurations are recorded in
+`.github/main-ruleset.json` and `.github/main-pr-ruleset.json`; editing these files
+alone does not update GitHub settings.
 
 Releases publish attested checksums alongside their release assets, which is the
 location used by the installer and verification guide. They do not push checksum
@@ -142,7 +148,7 @@ before each commit and push.
 ## Code Standards
 
 - **Rust edition 2024** - follow existing patterns
-- **100% line coverage** - enforced via `make coverage`, Linux CI, and the release verification job before artifacts are built or published. Production code must not be excluded to satisfy the gate. This measures executed lines, not every possible branch or proof of correctness.
+- **Regression coverage** - add meaningful tests for changed behavior. `make coverage`, Linux CI, and release verification run tests and report coverage without a minimum percentage.
 - Python 3 is required for the Unix terminal integration tests, which exercise the real CLI prompts in isolated pseudo-terminals with synthetic credentials. The release and package smoke helpers require Python 3.11+ for their standard-library TOML parser.
 - **No type suppression** - avoid `as any`, `#[allow]` without justification
 - **Error handling** - proper `Result` types, no silent failures

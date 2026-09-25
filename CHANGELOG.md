@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-25
+
 ### Added
 
 - `status --all --compact` groups short usage and reset-time summaries by account
@@ -20,7 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Raise the required Rust line coverage from 90% to 100% locally and in CI.
+- Run tests and report Rust line coverage locally, in CI, and before release
+  without requiring a minimum coverage percentage.
+- Require PRs from contributors while allowing only the owner's account to push
+  directly to `main`; required checks and branch protections apply to everyone.
 - Update Rust dependencies and pinned GitHub Actions across the release and CI
   workflows.
 
@@ -50,7 +55,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Refuse mutations when the profile index is malformed, preserving metadata for
   explicit recovery with `doctor --fix`.
 - Preserve executable permissions in native release archives and verify artifact
-  hashes, expected contents, and permissions before publishing.
+  hashes, binary contents, npm package metadata, Homebrew checksums, and permissions
+  before publishing.
 - `--version` and `-V` now print to stdout and exit successfully.
 - Keep Cargo.lock in sync when the release helper bumps the version.
 - Test built binaries and npm packages before publishing, including version/help
@@ -59,7 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Documentation
 
 - Explain account profiles versus native Codex configuration profiles, record the
-  September 22 upstream source review, and document usage JSON compatibility.
+  September 24 upstream source review, and document usage JSON compatibility.
 
 ## [0.3.2] - 2026-09-15
 
@@ -217,7 +223,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pre-commit hooks for code quality
 - Binary releases for 5 platforms (Linux x64/ARM64, macOS Intel/Apple Silicon, Windows x64)
 
-[Unreleased]: https://github.com/midhunmonachan/codex-profiles/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/midhunmonachan/codex-profiles/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/midhunmonachan/codex-profiles/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/midhunmonachan/codex-profiles/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/midhunmonachan/codex-profiles/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/midhunmonachan/codex-profiles/compare/v0.2.0...v0.3.0

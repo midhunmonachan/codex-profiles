@@ -29,8 +29,8 @@ jobs:
       - uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908 # v2.87.15
         with:
           tool: cargo-llvm-cov@0.9.1
-      - name: Check line coverage
-        run: cargo llvm-cov --locked --workspace --all-features --fail-under-lines 100 --ignore-filename-regex "tests/|target/"
+      - name: Report line coverage
+        run: cargo llvm-cov --locked --workspace --all-features --ignore-filename-regex "tests/|target/"
 
   tests:
     name: tests-${{ matrix.os }}

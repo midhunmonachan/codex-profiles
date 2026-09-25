@@ -86,7 +86,7 @@ Use synthetic auth fixtures and loopback HTTP servers for refresh, switching,
 rate-limit parsing, malformed responses, and concurrency tests. No test should
 use the developer's real `auth.json`, perform a real login/logout, or contact the
 live usage service. Run formatting, Clippy, the Rust suite, security audit,
-100% Rust line coverage, and package smoke checks before release. Unix terminal
+Rust line-coverage reporting, and package smoke checks before release. Unix terminal
 tests use Python 3's standard-library pseudo-terminal support to drive real
 prompts, including cancellation and concurrent filesystem changes. Cross-platform CI and a
 controlled live-account check remain distinct from local Linux verification.
