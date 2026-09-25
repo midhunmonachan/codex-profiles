@@ -95,8 +95,9 @@ tested before merging; they are not automatically merged.
 The npm platform packages are versioned together by the release process, so they
 are not independently updated by Dependabot.
 
-Every PR, including documentation-only changes, and every push to `main` runs the
-Windows, macOS, Linux, security-audit, and coverage checks. The required-checks
+Every PR targeting `main`, including documentation-only changes, and every push
+to `main` or a `codex/**` branch runs the Windows, macOS, Linux, security-audit,
+and coverage checks. The required-checks
 ruleset requires these GitHub Actions checks against an up-to-date branch and
 prevents force pushes and branch deletion. It has no bypass actors, so these
 requirements apply to everyone, including the owner.
@@ -108,6 +109,10 @@ contributors, including future collaborators and administrators, must use PRs.
 A second person's approval is not required. The configurations are recorded in
 `.github/main-ruleset.json` and `.github/main-pr-ruleset.json`; editing these files
 alone does not update GitHub settings.
+
+For owner direct updates, push the candidate to a `codex/**` branch, wait for all
+five checks from that push to pass, then fast-forward the same commit to `main`.
+Manual workflow runs do not satisfy GitHub's required-check rules.
 
 Releases publish attested checksums alongside their release assets, which is the
 location used by the installer and verification guide. They do not push checksum
