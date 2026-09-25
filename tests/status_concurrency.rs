@@ -197,6 +197,10 @@ fn accept_with_deadline(listener: &TcpListener) -> TcpStream {
     loop {
         match listener.accept() {
             Ok((stream, _)) => {
+                // Accepted sockets can inherit the listener's nonblocking mode on BSD.
+                stream
+                    .set_nonblocking(false)
+                    .expect("set accepted stream blocking");
                 stream
                     .set_read_timeout(Some(Duration::from_secs(10)))
                     .expect("set read timeout");

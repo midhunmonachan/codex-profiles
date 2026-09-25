@@ -160,6 +160,12 @@ fn start_responses(
         loop {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    stream
+                        .set_nonblocking(false)
+                        .expect("set accepted stream blocking");
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(10)))
+                        .expect("set read timeout");
                     let mut request = [0u8; 2048];
                     let _ = stream.read(&mut request);
                     if responses.is_empty() {

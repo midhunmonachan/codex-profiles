@@ -467,6 +467,12 @@ fn start_response_server(
         loop {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    stream
+                        .set_nonblocking(false)
+                        .expect("set accepted stream blocking");
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(10)))
+                        .expect("set read timeout");
                     let mut buf = [0u8; 1024];
                     let _ = stream.read(&mut buf);
                     if responses.is_empty() {
