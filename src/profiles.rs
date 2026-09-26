@@ -3428,23 +3428,23 @@ mod tests {
         let mut tokens = BTreeMap::new();
         tokens.insert(
             "id-z".to_string(),
-            Ok(make_tokens("acct-z", "z@ex.com", "team")),
+            Ok(make_tokens("acct-z", "z@example.com", "team")),
         );
         tokens.insert(
             "id-a".to_string(),
-            Ok(make_tokens("acct-a", "a@ex.com", "team")),
+            Ok(make_tokens("acct-a", "a@example.com", "team")),
         );
         tokens.insert(
             "id-u1".to_string(),
-            Ok(make_tokens("acct-u1", "c@ex.com", "team")),
+            Ok(make_tokens("acct-u1", "c@example.com", "team")),
         );
         tokens.insert(
             "id-u2".to_string(),
-            Ok(make_tokens("acct-u2", "b@ex.com", "team")),
+            Ok(make_tokens("acct-u2", "b@example.com", "team")),
         );
         tokens.insert(
             "id-b".to_string(),
-            Ok(make_tokens("acct-b", "d@ex.com", "team")),
+            Ok(make_tokens("acct-b", "d@example.com", "team")),
         );
 
         let snapshot = Snapshot {
@@ -3629,7 +3629,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = make_paths(dir.path());
         fs::create_dir_all(&paths.profiles).unwrap();
-        write_profile(&paths, "base", "acct", "a@b.com", "pro");
+        write_profile(&paths, "base", "acct", "a@example.com", "pro");
         let id = unique_id(
             "base",
             &make_identity("acct", "acct", "pro"),
@@ -3650,7 +3650,7 @@ mod tests {
         let paths = make_paths(dir.path());
         fs::create_dir_all(&paths.profiles).unwrap();
         let bad_path = paths.profiles.join("bad.json");
-        write_profile(&paths, "valid", "acct", "a@b.com", "pro");
+        write_profile(&paths, "valid", "acct", "a@example.com", "pro");
         fs::write(&bad_path, "not-json").unwrap();
         let index = serde_json::json!({
             "version": 1,
@@ -3719,7 +3719,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = make_paths(dir.path());
         fs::create_dir_all(&paths.profiles).unwrap();
-        write_profile(&paths, "one", "acct", "a@b.com", "pro");
+        write_profile(&paths, "one", "acct", "a@example.com", "pro");
         let tokens = read_tokens(&paths.profiles.join("one.json")).unwrap();
         let mut index = ProfilesIndex::default();
         let id = resolve_save_id(&paths, &mut index, &tokens).unwrap();
@@ -3911,7 +3911,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = make_paths(dir.path());
         fs::create_dir_all(&paths.profiles).unwrap();
-        write_auth(&paths.auth, "acct", "a@b.com", "pro", "acc", "ref");
+        write_auth(&paths.auth, "acct", "a@example.com", "pro", "acc", "ref");
         crate::ensure_paths(&paths).unwrap();
         save_profile(&paths, Some("team".to_string()), false).unwrap();
         list_profiles(&paths, false, false).unwrap();
@@ -3924,7 +3924,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = make_paths(dir.path());
         fs::create_dir_all(&paths.profiles).unwrap();
-        write_auth(&paths.auth, "acct", "a@b.com", "pro", "acc", "ref");
+        write_auth(&paths.auth, "acct", "a@example.com", "pro", "acc", "ref");
         crate::ensure_paths(&paths).unwrap();
         save_profile(&paths, Some("team".to_string()), false).unwrap();
         delete_profile(&paths, true, Some("team".to_string()), vec![], false).unwrap();

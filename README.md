@@ -97,7 +97,7 @@ codex-profiles status --all --compact
       <td>Save current <code>auth.json</code><br/>Optional label</td>
     </tr>
     <tr>
-      <td width="43%"><code>codex-profiles load</code><br/><code>(--label &lt;name&gt; | --id &lt;profile-id&gt;)</code><br/><code>[--force] [--with-status]</code></td>
+      <td width="43%"><code>codex-profiles load</code><br/><code>[--label &lt;name&gt; | --id &lt;profile-id&gt;]</code><br/><code>[--force] [--with-status]</code></td>
       <td>Load a saved profile<br/>Add <code>--with-status</code> to show usage and reset times</td>
     </tr>
     <tr>
@@ -105,7 +105,7 @@ codex-profiles status --all --compact
       <td>List profiles<br/>Supports id and JSON views</td>
     </tr>
     <tr>
-      <td width="44%"><code>codex-profiles export</code><br/><code>[--label &lt;name&gt;]</code><br/><code>[--id &lt;profile-id&gt; (repeatable)]</code></td>
+      <td width="44%"><code>codex-profiles export</code><br/><code>--output &lt;file&gt;</code><br/><code>[--label &lt;name&gt; | --id &lt;profile-id&gt; (repeatable)]</code></td>
       <td>Export to a JSON bundle<br/>Default: all profiles, or a selected subset</td>
     </tr>
     <tr>
@@ -141,7 +141,9 @@ codex-profiles status --all --compact
 
 ### Notes
 
-- `load` and `delete` are interactive unless you pass `--label` or `--id`
+- `load` and `delete` open a profile picker unless you pass `--label` or `--id`.
+  Selecting a profile does not skip other prompts: `load` may ask about unsaved
+  active credentials, and `delete` requires confirmation unless you pass `--yes`.
 - With `load --with-status`, the profile still switches even if the status check fails
 - `status --all --compact` shows remaining usage and reset times without progress
   bars. Use `--json` for scripts; it cannot be combined with `--compact`.
@@ -156,7 +158,8 @@ codex-profiles status --all --compact
 - [Client compatibility and credential storage](docs/compatibility.md)
 - [Release verification guide](https://github.com/midhunmonachan/codex-profiles/blob/main/docs/verification.md)
 - [Contribution guide](https://github.com/midhunmonachan/codex-profiles/blob/main/CONTRIBUTING.md)
-- [Next-version research and scope](docs/next-version.md)
+- [v0.4.0 research and release scope](docs/next-version.md)
+- [Optional config snapshots: design proposal (not implemented)](docs/config-snapshots.md)
 
 ## FAQ
 
@@ -190,8 +193,10 @@ codex-profiles status --all --compact
 <details>
 <summary>What happens if I run load without saving?</summary>
 
-> You will be prompted to save the active profile, continue without saving, or
-> cancel
+> When the active credentials are unsaved, an interactive terminal prompts you to
+> save them, continue without saving, or cancel. In scripts, save them first or
+> explicitly use `--force` to continue without saving. A `--label` or `--id`
+> selector alone does not skip this check.
 </details>
 
 <details>

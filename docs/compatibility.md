@@ -20,7 +20,7 @@ it is canonicalized before use. A missing path is an error, not a new empty prof
 For example, in PowerShell:
 
 ```powershell
-$env:CODEX_HOME = 'C:\Users\YourName\codex-work'
+$env:CODEX_HOME = Join-Path $env:USERPROFILE 'codex-work'
 New-Item -ItemType Directory -Path $env:CODEX_HOME -Force
 codex login
 codex-profiles save --label work
