@@ -2,8 +2,8 @@
   "schema_version": 1,
   "repository": "openai/codex",
   "branch": "main",
-  "reviewed_commit": "a33fb9751c1e468b0062aae63e8f06e9d75e2376",
-  "reviewed_on": "2026-09-24",
+  "reviewed_commit": "25270df2615eb4da5b9d4a9a392226933fb096c5",
+  "reviewed_on": "2026-09-25",
   "paths": [
     "codex-rs/utils/home-dir/src/lib.rs",
     "codex-rs/config/src/types.rs",

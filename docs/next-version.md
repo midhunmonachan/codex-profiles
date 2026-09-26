@@ -1,9 +1,9 @@
-# Next-version research and release scope
+# v0.4.0 research and release scope
 
 Reviewed September 24, 2026. Project baseline: [`879e538`](https://github.com/midhunmonachan/codex-profiles/commit/879e538ca3d007768fe1c710add0f8ee573d918d), after v0.3.2.
 Upstream comparison: [`openai/codex` at `a33fb975`](https://github.com/openai/codex/tree/a33fb9751c1e468b0062aae63e8f06e9d75e2376).
 
-The next release combines account-switching reliability with clearer usage
+The v0.4.0 release combines account-switching reliability with clearer usage
 reporting. It keeps account credentials separate from Codex configuration.
 
 ## Findings and implementation priorities
@@ -68,11 +68,13 @@ status view grouped by account and bucket, while keeping `list` local and fast.
 The existing `load --with-status` feature remains the immediate post-switch view.
 
 [Config snapshots (#25)](https://github.com/midhunmonachan/codex-profiles/issues/25)
-and [encrypted exports (#20)](https://github.com/midhunmonachan/codex-profiles/issues/20)
-remain separate design work. Config snapshots need clear ownership, restoration,
-and conflict behavior. Encryption needs a reviewed format, key derivation,
-password handling, migration, and recovery design. Neither is necessary to ship
-the confirmed reliability fixes and compact status view.
+now have a [contributor-facing design proposal](config-snapshots.md), prepared
+after v0.4.0. Storage, restoration conflicts, and recovery decisions remain open
+for maintainer/contributor agreement before implementation.
+[Encrypted exports (#20)](https://github.com/midhunmonachan/codex-profiles/issues/20)
+remain separate design work. Encryption needs a reviewed format, key derivation,
+password handling, migration, and recovery design. Neither feature was included
+in v0.4.0's reliability fixes and compact status view.
 
 Also deferred: direct keyring support, a persistent app-server integration, a GUI,
 and changes to the persisted account identity schema. The duplicate-alias guard

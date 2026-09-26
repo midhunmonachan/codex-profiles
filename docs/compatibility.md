@@ -141,8 +141,8 @@ customized, the command, and a redacted error.
 Source checked September 24, 2026: [OpenAI authentication documentation](https://learn.chatgpt.com/docs/auth)
 and [app-server rate-limit documentation](https://learn.chatgpt.com/docs/app-server).
 
-Implementation cross-check: `openai/codex` revision
-[`a33fb9751c1e468b0062aae63e8f06e9d75e2376`](https://github.com/openai/codex/tree/a33fb9751c1e468b0062aae63e8f06e9d75e2376),
+Implementation cross-check, reviewed September 25, 2026: `openai/codex` revision
+[`25270df2615eb4da5b9d4a9a392226933fb096c5`](https://github.com/openai/codex/tree/25270df2615eb4da5b9d4a9a392226933fb096c5),
 specifically `codex-rs/utils/home-dir/src/lib.rs`, `codex-rs/config/src/types.rs`,
 `codex-rs/login/src/auth/storage.rs`, `codex-rs/login/src/auth/manager.rs`, and
 `codex-rs/protocol/src/auth.rs`, and `codex-rs/backend-client/src/client.rs`.
@@ -153,6 +153,23 @@ ephemeral upstream and are deliberately rejected rather than treated as refresha
 The current source also has agent-identity, personal-access-token, externally
 supplied headers, and Bedrock modes; these remain outside the file-backed profile
 boundary and are rejected before profile data is read or written.
+
+The baseline advanced from `a33fb9751c1e468b0062aae63e8f06e9d75e2376` after
+comparing complete Git trees at both revisions and reviewing all changes in
+those six paths with their relevant local consumers. Home-directory resolution,
+auth storage, and the auth manager were byte-identical. The changed files added:
+
+- An MCP startup-readiness re-export and TUI prompt-suggestion/right-click-paste
+  settings in [configuration types](https://github.com/openai/codex/blob/25270df2615eb4da5b9d4a9a392226933fb096c5/codex-rs/config/src/types.rs).
+- The `promax` plan identifier and revised plan display labels in
+  [auth protocol types](https://github.com/openai/codex/blob/25270df2615eb4da5b9d4a9a392226933fb096c5/codex-rs/protocol/src/auth.rs).
+- A `ProMax` plan mapping in the [backend client](https://github.com/openai/codex/blob/25270df2615eb4da5b9d4a9a392226933fb096c5/codex-rs/backend-client/src/client.rs).
+
+No change requiring a file-backed credential or usage-parser fix was identified
+in that review. Codex Profiles accepts plan identifiers as strings; its display
+labels may differ from Codex's labels. This review covers the monitored paths
+and their local consumers, not live OAuth switching, the full upstream dependency
+graph, or current service behavior.
 
 ## Upstream monitoring
 
