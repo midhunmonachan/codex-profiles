@@ -1,0 +1,35 @@
+name: codex-compatibility
+
+on:
+  schedule:
+    - cron: "23 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  monitor:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Compare reviewed source with current upstream
+        env:
+          REPORT_DIR: ${{ runner.temp }}/codex-compatibility
+        run: python3 -B scripts/check-codex-compatibility.py --output-dir "$REPORT_DIR"
+      - name: Summarize comparison
+        if: always()
+        run: |
+          if [[ -f "$RUNNER_TEMP/codex-compatibility/report.md" ]]; then
+            cat "$RUNNER_TEMP/codex-compatibility/report.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: codex-compatibility
+          path: ${{ runner.temp }}/codex-compatibility/
+          if-no-files-found: error
+          retention-days: 30

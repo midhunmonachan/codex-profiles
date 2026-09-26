@@ -153,3 +153,20 @@ ephemeral upstream and are deliberately rejected rather than treated as refresha
 The current source also has agent-identity, personal-access-token, externally
 supplied headers, and Bedrock modes; these remain outside the file-backed profile
 boundary and are rejected before profile data is read or written.
+
+## Upstream monitoring
+
+The `codex-compatibility` workflow compares those six source paths against the
+reviewed revision in [the baseline](../.github/codex-compatibility.json) every
+Monday at 08:23 UTC and on manual dispatch. It resolves upstream `main` once and
+compares complete Git trees at immutable revisions, including file types and modes.
+
+Its job summary and `codex-compatibility` artifact report `unchanged`,
+`review_required`, or `incomplete`. Changes are advisory; they do not establish
+incompatibility. Unchanged monitored paths do not prove overall compatibility.
+Network failures, malformed responses, or truncated trees fail the run instead
+of producing a clean report. The workflow has a five-minute overall limit.
+
+The monitor does not update the baseline or open issues. After reviewing changed
+behavior against official documentation and relevant callers, update the baseline
+and this document together, with any necessary implementation and regression tests.

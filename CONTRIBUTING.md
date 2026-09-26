@@ -114,6 +114,22 @@ For owner direct updates, push the candidate to a `codex/**` branch, wait for al
 five checks from that push to pass, then fast-forward the same commit to `main`.
 Manual workflow runs do not satisfy GitHub's required-check rules.
 
+The release automation and Codex monitor have offline Python regression tests:
+
+```bash
+python3 -B scripts/test-automation.py
+```
+
+They run in all three OS test jobs and before release builds. Check upstream
+changes locally or request the weekly monitor on demand:
+
+```bash
+python3 -B scripts/check-codex-compatibility.py --output-dir target/codex-compatibility
+gh workflow run codex-compatibility.yml --ref main
+```
+
+Review its report using the process in [compatibility.md](docs/compatibility.md).
+
 Releases publish attested checksums alongside their release assets, which is the
 location used by the installer and verification guide. They do not push checksum
 copies directly to protected `main`. Existing historical copies remain available.
@@ -176,6 +192,22 @@ make release-tag ARGS="--bump patch"
 `--bump` also syncs npm `optionalDependencies` package versions. `install.sh`
 resolves the latest published release automatically, and you can still pin a
 specific version with `CODEX_PROFILES_VERSION` or `--version`.
+
+Before tagging, write a nonempty version section in `CHANGELOG.md`. Publication
+uses that section from the tagged checkout, preserving its Markdown and excluding
+unreleased work. Preview it with `make print-release-notes ARGS="vX.Y.Z"`.
+
+Pushing the tag starts publication. To recover an unfinished publication, select
+the same tag as both the workflow ref and input so provenance identifies the tag:
+
+```bash
+gh workflow run release.yml --ref vX.Y.Z -f tag=vX.Y.Z
+```
+
+Completed immutable releases cannot have their assets replaced. Use the separate
+[read-only verification workflow](docs/verification.md#automated-verification)
+to check a published release. Future tags include the new automation; selecting
+an older tag runs the workflow version stored at that tag.
 
 ## Questions?
 

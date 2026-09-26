@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Verify published release assets, attestations, and npm/crates.io packages after
+  publication, with a separate read-only workflow for checking existing releases.
+- Monitor the reviewed `openai/codex` source paths weekly and on demand, reporting
+  upstream changes for compatibility review without updating the baseline.
+
+### Changed
+
+- Publish the tagged changelog section as release notes and upload all GitHub
+  assets to a draft before publishing stable releases or prereleases.
+- Require manual publication to run against the matching tag ref so artifact
+  attestations identify the intended release source.
+
 ## [0.4.0] - 2026-09-25
 
 ### Added

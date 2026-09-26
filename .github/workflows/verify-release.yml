@@ -1,0 +1,42 @@
+name: verify-release
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+      expected_commit:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release tag to verify (for example, v0.4.0)
+        required: true
+        type: string
+      expected_commit:
+        description: Optional expected full commit SHA
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  attestations: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify published assets, attestations, and registry packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          EXPECTED_COMMIT: ${{ inputs.expected_commit }}
+        run: |
+          python3 -B scripts/verify-release.py "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" --expected-commit "$EXPECTED_COMMIT"

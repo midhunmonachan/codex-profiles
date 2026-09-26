@@ -7,6 +7,43 @@ Each GitHub release includes:
 - GitHub artifact attestations for release assets
 - npm provenance for published npm packages
 
+## Automated verification
+
+The release workflow verifies the published result after uploading all assets and
+publishing the GitHub release. An unsuccessful verification fails the release run;
+it does not roll back packages already published to registries.
+
+From a checkout containing the verifier, check an existing release without
+publishing it again:
+
+```bash
+python3 -B scripts/verify-release.py v0.4.0
+```
+
+This requires Python 3.11+, an authenticated GitHub CLI with attestation support,
+and network access. Add `--expected-commit FULL_SHA` to require a particular source
+commit. Or run the read-only GitHub Actions workflow:
+
+```bash
+gh workflow run verify-release.yml --ref main -f tag=v0.4.0
+```
+
+The verifier requires an immutable release with exactly 15 expected assets. It
+checks GitHub asset digests, every payload checksum, manifest membership and the
+resolved tag commit, release integrity, and all asset attestations. Attestations
+must come from this repository's release workflow at that tag and commit, using
+GitHub-hosted runners. Assets larger than 64 MiB are rejected.
+
+For stable production releases, it also compares all six public npm tarballs and
+the crates.io package byte-for-byte with the attested release assets and checks
+their registry integrity metadata. It checks that npm advertises provenance;
+this is separate from verifying npm's provenance signatures. Prereleases and
+forks skip registry verification because their publication workflow skips those
+registries. Public registry requests use no credentials, allow at most four
+attempts, and honor short `Retry-After` delays. Each socket operation has a
+20-second timeout; the workflow has a 15-minute overall limit. Temporary
+downloads are removed when verification finishes or raises an error.
+
 ## Verify GitHub release assets
 
 Download the release asset you want to inspect together with `SHA256SUMS` and

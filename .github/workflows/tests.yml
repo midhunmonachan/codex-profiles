@@ -99,3 +99,5 @@ jobs:
       - name: Test release artifact verification
         if: runner.os == 'Linux'
         run: python scripts/test-release-artifacts.py
+      - name: Test release automation and compatibility monitoring
+        run: python -B scripts/test-automation.py
