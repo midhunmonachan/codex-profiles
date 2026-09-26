@@ -1287,24 +1287,25 @@ mod tests {
         let mut stale = read_update_cache(&paths).unwrap().unwrap();
         stale.last_checked_at = Utc::now() - Duration::hours(21);
         write_update_cache(&paths, &stale).unwrap();
+        let refresh_url = spawn_server(http_ok_response(release_body, "application/json"));
+        let _refresh_env = set_env_guard(LATEST_RELEASE_URL_OVERRIDE_ENV_VAR, Some(&refresh_url));
         assert_eq!(
             get_upgrade_version_with_debug(&config, false).as_deref(),
             Some("99.0.0")
         );
-        for _ in 0..100 {
-            if read_update_cache(&paths)
-                .unwrap()
-                .is_some_and(|value| value.last_checked_at > stale.last_checked_at)
-            {
-                break;
+        let deadline = std::time::Instant::now() + StdDuration::from_secs(5);
+        let refreshed = loop {
+            let value = read_update_cache(&paths).unwrap().unwrap();
+            if value.last_checked_at > stale.last_checked_at {
+                break value;
             }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        assert!(
-            read_update_cache(&paths)
-                .unwrap()
-                .is_some_and(|value| value.last_checked_at > stale.last_checked_at)
-        );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "background update refresh did not finish"
+            );
+            std::thread::sleep(StdDuration::from_millis(5));
+        };
+        assert_eq!(refreshed.latest_version, "99.0.0");
 
         let mut unknown_input = std::io::Cursor::new("");
         let mut unknown_output = Vec::new();
