@@ -6,6 +6,10 @@ current issues and pull requests before starting nontrivial work, and agree on
 feature scope through an issue or discussion. Keep changes focused and update
 documentation and regression tests when behavior changes.
 
+Keep current project status and outstanding decisions in
+[docs/next-version.md](docs/next-version.md). Update that record when work ships
+or scope is agreed; separate current status from dated historical research.
+
 ## Supported behavior
 
 Codex Profiles manages file-backed account credentials. Preserve `CODEX_HOME`

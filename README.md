@@ -158,7 +158,7 @@ codex-profiles status --all --compact
 - [Client compatibility and credential storage](docs/compatibility.md)
 - [Release verification guide](https://github.com/midhunmonachan/codex-profiles/blob/main/docs/verification.md)
 - [Contribution guide](https://github.com/midhunmonachan/codex-profiles/blob/main/CONTRIBUTING.md)
-- [v0.4.0 research and release scope](docs/next-version.md)
+- [Project status and release research](docs/next-version.md)
 - [Optional config snapshots: design proposal (not implemented)](docs/config-snapshots.md)
 
 ## FAQ

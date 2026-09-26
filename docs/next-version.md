@@ -1,4 +1,39 @@
-# v0.4.0 research and release scope
+# Project status and release research
+
+## Current status
+
+Status at [`b43e063`](https://github.com/midhunmonachan/codex-profiles/commit/b43e0630db41e0afe35a1579eb01c8c9f398cbf0):
+
+- [v0.4.0](https://github.com/midhunmonachan/codex-profiles/releases/tag/v0.4.0)
+  is published. Its reliability, usage-reporting, compact-status, and diagnostic
+  changes are recorded in [CHANGELOG.md](../CHANGELOG.md).
+- Subsequent work on `main` added automated release verification, tagged
+  changelog release notes, weekly Codex compatibility monitoring, and an updated
+  reviewed upstream baseline. See [verification.md](verification.md) and
+  [compatibility.md](compatibility.md) for the procedures and review limits.
+- [AGENTS.md](../AGENTS.md) and [CONTRIBUTING.md](../CONTRIBUTING.md) record the
+  public development guidance, required checks, and owner/contributor workflows.
+- [Config snapshots (#25)](https://github.com/midhunmonachan/codex-profiles/issues/25)
+  have a [design proposal](config-snapshots.md), with implementation decisions
+  still open. [Encrypted exports (#20)](https://github.com/midhunmonachan/codex-profiles/issues/20)
+  remain separate design work. Neither feature is implemented.
+
+## Next decision
+
+Research and select the next feature before starting implementation. Recheck
+current issues, pull requests, contributor discussions, shipped behavior, and
+official OpenAI Codex documentation and source. Account for the contributor
+interest in config snapshots and agree on scope before duplicating that work.
+
+Compare the open requests with other evidence-backed opportunities. Recommend
+one feature using user value, demonstrated demand, upstream fit, security and
+compatibility risks, implementation size, and ongoing maintenance cost. The
+recommendation should include a bounded first milestone, acceptance criteria,
+regression checks, and unresolved decisions. There is no selected next feature
+or scheduled next release yet. Keep this section current when those decisions
+are made; retain the dated research below as historical context.
+
+## v0.4.0 research baseline
 
 Reviewed September 24, 2026. Project baseline: [`879e538`](https://github.com/midhunmonachan/codex-profiles/commit/879e538ca3d007768fe1c710add0f8ee573d918d), after v0.3.2.
 Upstream comparison: [`openai/codex` at `a33fb975`](https://github.com/openai/codex/tree/a33fb9751c1e468b0062aae63e8f06e9d75e2376).
