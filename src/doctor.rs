@@ -868,6 +868,7 @@ mod tests {
         assert!(create_profiles_lock(&bad_parent.join("profiles.lock")).is_err());
         #[cfg(unix)]
         assert!(set_path_mode(Path::new("\0"), 0o600).is_err());
+        #[cfg(unix)]
         assert!(set_mode_if_needed(Path::new("\0"), 0o600).is_err());
     }
 
