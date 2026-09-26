@@ -269,7 +269,12 @@ pub fn export_profiles(
     let mut bytes = serde_json::to_vec_pretty(&bundle)
         .expect("export bundles contain only JSON values and string keys");
     bytes.push(b'\n');
-    crate::common::write_atomic_private(&output, &bytes)?;
+    crate::common::create_atomic_private(&output, &bytes).map_err(|err| match err {
+        crate::common::AtomicCreateError::AlreadyExists => {
+            format!("Error: Export file already exists: {}", output.display())
+        }
+        crate::common::AtomicCreateError::Write(message) => message,
+    })?;
 
     let count = bundle.profiles.len();
     let noun = if count == 1 { "profile" } else { "profiles" };
@@ -344,20 +349,25 @@ pub fn import_profiles(paths: &Paths, input: PathBuf, json: bool) -> Result<(), 
         prepared.push(prepare_import_profile(profile)?);
     }
 
-    let mut written_ids = Vec::with_capacity(prepared.len());
+    let mut written = Vec::with_capacity(prepared.len());
     for profile in &prepared {
         let path = profile_path_for_id(&paths.profiles, &profile.id);
-        if let Err(err) = crate::common::write_atomic_private(&path, &profile.contents) {
-            cleanup_imported_profiles(paths, &written_ids);
-            return Err(err);
+        match crate::common::create_atomic_private_tracked(&path, &profile.contents) {
+            Ok(created) => written.push((profile, created)),
+            Err(err) => {
+                let error = match err {
+                    crate::common::AtomicCreateError::AlreadyExists => {
+                        format!("Error: Profile '{}' already exists.", profile.id)
+                    }
+                    crate::common::AtomicCreateError::Write(message) => message,
+                };
+                return Err(cleanup_imported_profiles(paths, &written, error));
+            }
         }
-        written_ids.push(profile.id.clone());
     }
 
+    store.labels = staged_labels;
     for profile in &prepared {
-        if let Some(label) = profile.label.as_deref() {
-            assign_label(&mut store.labels, label, &profile.id)?;
-        }
         update_profiles_index_entry(
             &mut store.profiles_index,
             &profile.id,
@@ -366,8 +376,7 @@ pub fn import_profiles(paths: &Paths, input: PathBuf, json: bool) -> Result<(), 
         );
     }
     if let Err(err) = store.save(paths) {
-        cleanup_imported_profiles(paths, &written_ids);
-        return Err(err);
+        return Err(cleanup_imported_profiles(paths, &written, err));
     }
 
     let count = prepared.len();
@@ -1375,9 +1384,27 @@ fn is_reserved_profile_id(id: &str) -> bool {
     id.eq_ignore_ascii_case("profiles") || id.eq_ignore_ascii_case("update")
 }
 
-fn cleanup_imported_profiles(paths: &Paths, ids: &[String]) {
-    for id in ids {
-        let _ = fs::remove_file(profile_path_for_id(&paths.profiles, id));
+fn cleanup_imported_profiles(
+    paths: &Paths,
+    written: &[(&PreparedImportProfile, crate::common::CreatedFile)],
+    error: String,
+) -> String {
+    let mut retained = 0;
+    for (profile, created) in written {
+        let path = profile_path_for_id(&paths.profiles, &profile.id);
+        if !matches!(
+            created.remove_if_unchanged(&path, &profile.contents),
+            Ok(true)
+        ) {
+            retained += 1;
+        }
+    }
+    if retained == 0 {
+        error
+    } else {
+        format!(
+            "{error}\nImport rollback incomplete: {retained} profile file(s) changed or could not be verified/removed. Inspect the profile store before retrying."
+        )
     }
 }
 

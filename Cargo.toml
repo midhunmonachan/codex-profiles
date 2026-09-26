@@ -39,5 +39,8 @@ supports-color = "3.0"
 toml = "1.1"
 ureq = { version = "3.2", features = ["json"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 tempfile = "3.25"

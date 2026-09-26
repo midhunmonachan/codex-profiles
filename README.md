@@ -152,6 +152,14 @@ codex-profiles status --all --compact
 - Finish active Codex work before switching and restart the affected client
   afterward. See [client compatibility](docs/compatibility.md).
 - Export bundles contain secrets
+- Export refuses existing output paths, including dangling symlinks and files
+  created during export. The output filesystem must support hard links; an
+  unsupported filesystem returns an error without replacing the destination.
+- Import also refuses a profile path created during the operation and requires
+  hard-link support and readable file identities. On failure, rollback checks
+  file identity and contents and reports any files it cannot safely verify or
+  remove. Inspect the store before retrying an incomplete rollback. Keep other
+  writers out of the store during import; rollback is not a filesystem transaction.
 
 ## More Docs
 

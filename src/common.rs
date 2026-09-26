@@ -4,7 +4,7 @@ use directories::BaseDirs;
 use serde_json::Value;
 use std::env;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -75,12 +75,48 @@ pub(crate) const FAIL_WRITE_WRITE: usize = 3;
 pub(crate) const FAIL_WRITE_PERMS: usize = 4;
 pub(crate) const FAIL_WRITE_SYNC: usize = 5;
 pub(crate) const FAIL_WRITE_RENAME: usize = 6;
+pub(crate) const FAIL_FILE_IDENTITY: usize = 7;
+
+#[cfg(test)]
+type AtomicCommitHook = fn(&Path, &Path);
 
 #[cfg(test)]
 thread_local! {
     static FAILPOINT: Cell<usize> = const { Cell::new(0) };
     static FAILPOINT_REMAINING: Cell<usize> = const { Cell::new(0) };
+    static BEFORE_ATOMIC_COMMIT: Cell<Option<AtomicCommitHook>> = const { Cell::new(None) };
+    static BEFORE_ATOMIC_COMMIT_REMAINING: Cell<usize> = const { Cell::new(0) };
 }
+
+#[cfg(test)]
+pub(crate) struct AtomicCommitHookGuard {
+    previous: Option<AtomicCommitHook>,
+    previous_remaining: usize,
+}
+
+#[cfg(test)]
+impl AtomicCommitHookGuard {
+    pub(crate) fn new(hook: AtomicCommitHook) -> Self {
+        Self::on_nth_commit(hook, 1)
+    }
+
+    pub(crate) fn on_nth_commit(hook: AtomicCommitHook, hit: usize) -> Self {
+        Self {
+            previous: BEFORE_ATOMIC_COMMIT.with(|slot| slot.replace(Some(hook))),
+            previous_remaining: BEFORE_ATOMIC_COMMIT_REMAINING
+                .with(|remaining| remaining.replace(hit.saturating_sub(1))),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for AtomicCommitHookGuard {
+    fn drop(&mut self) {
+        BEFORE_ATOMIC_COMMIT.with(|slot| slot.set(self.previous));
+        BEFORE_ATOMIC_COMMIT_REMAINING.with(|remaining| remaining.set(self.previous_remaining));
+    }
+}
+
 #[cfg(test)]
 fn maybe_fail(step: usize) -> std::io::Result<()> {
     if FAILPOINT.with(|failpoint| failpoint.get()) == step {
@@ -334,11 +370,177 @@ pub fn write_atomic_private(path: &Path, contents: &[u8]) -> Result<(), String> 
     }
 }
 
+#[derive(Debug)]
+pub(crate) enum AtomicCreateError {
+    AlreadyExists,
+    Write(String),
+}
+
+pub(crate) struct CreatedFile {
+    // Keep the original file open so its identity cannot be recycled after a
+    // concurrent replacement. This receipt never deletes anything on drop.
+    _file: fs::File,
+    identity: FileIdentity,
+}
+
+#[derive(PartialEq, Eq)]
+struct FileIdentity {
+    volume: u64,
+    file: u128,
+}
+
+fn file_identity(file: &fs::File) -> std::io::Result<FileIdentity> {
+    maybe_fail(FAIL_FILE_IDENTITY)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata()?;
+        Ok(FileIdentity {
+            volume: metadata.dev(),
+            file: metadata.ino().into(),
+        })
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ID_128, FILE_ID_INFO, FileIdInfo, GetFileInformationByHandleEx,
+        };
+        let mut info = FILE_ID_INFO {
+            VolumeSerialNumber: 0,
+            FileId: FILE_ID_128 {
+                Identifier: [0; 16],
+            },
+        };
+        // SAFETY: the borrowed File keeps the handle live throughout this call.
+        // FileIdInfo writes exactly FILE_ID_INFO into the correctly aligned,
+        // initialized buffer, whose full size is supplied. No pointer escapes.
+        let success = unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FileIdInfo,
+                (&mut info as *mut FILE_ID_INFO).cast(),
+                std::mem::size_of::<FILE_ID_INFO>() as u32,
+            )
+        };
+        if success == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(FileIdentity {
+            volume: info.VolumeSerialNumber,
+            file: u128::from_le_bytes(info.FileId.Identifier),
+        })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = file;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "file identity is unavailable on this platform",
+        ))
+    }
+}
+
+impl CreatedFile {
+    /// Rollback under the caller's store lock, preserving detected replacements
+    /// and edits. The final identity check and unlink are separate operations;
+    /// a noncooperating writer can still race them. See docs/compatibility.md.
+    pub(crate) fn remove_if_unchanged(
+        &self,
+        path: &Path,
+        expected: &[u8],
+    ) -> std::io::Result<bool> {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+            Err(err) => return Err(err),
+        };
+        if !metadata.is_file() || metadata.len() != expected.len() as u64 {
+            return Ok(false);
+        }
+        let current = fs::File::open(path)?;
+        if file_identity(&current)? != self.identity {
+            return Ok(false);
+        }
+        let mut contents = Vec::new();
+        (&current)
+            .take(expected.len().saturating_add(1) as u64)
+            .read_to_end(&mut contents)?;
+        if contents != expected
+            || !fs::symlink_metadata(path)?.is_file()
+            || file_identity(&fs::File::open(path)?)? != self.identity
+        {
+            return Ok(false);
+        }
+        match fs::remove_file(path) {
+            Ok(()) => Ok(true),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Err(err) => Err(err),
+        }
+    }
+}
+
+/// Publish a complete private file without replacing any existing directory entry.
+/// The destination filesystem must support hard links; failures never fall back
+/// to a replacing rename or a partially written destination.
+pub(crate) fn create_atomic_private(path: &Path, contents: &[u8]) -> Result<(), AtomicCreateError> {
+    create_atomic_private_with(path, contents, |file| {
+        drop(file);
+        Ok(())
+    })
+}
+
+pub(crate) fn create_atomic_private_tracked(
+    path: &Path,
+    contents: &[u8],
+) -> Result<CreatedFile, AtomicCreateError> {
+    create_atomic_private_with(path, contents, |file| {
+        let identity = file_identity(&file)?;
+        Ok(CreatedFile {
+            _file: file,
+            identity,
+        })
+    })
+}
+
+fn create_atomic_private_with<T>(
+    path: &Path,
+    contents: &[u8],
+    capture: impl FnOnce(fs::File) -> std::io::Result<T>,
+) -> Result<T, AtomicCreateError> {
+    #[cfg(unix)]
+    let permissions = {
+        use std::os::unix::fs::PermissionsExt;
+        Some(fs::Permissions::from_mode(0o600))
+    };
+    #[cfg(not(unix))]
+    let permissions = None;
+
+    let (pending, file) =
+        prepare_atomic_write(path, contents, permissions).map_err(AtomicCreateError::Write)?;
+    let receipt = capture(file).map_err(|err| {
+        AtomicCreateError::Write(crate::msg2(COMMON_ERR_READ_METADATA, path.display(), err))
+    })?;
+    // Linking in the same directory makes the destination appear only when the
+    // complete file is ready, and atomically refuses an occupied name.
+    match maybe_fail(FAIL_WRITE_RENAME).and_then(|_| fs::hard_link(&pending.0, path)) {
+        Ok(()) => Ok(receipt),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(AtomicCreateError::AlreadyExists)
+        }
+        Err(err) => Err(AtomicCreateError::Write(crate::msg2(
+            COMMON_ERR_REPLACE_FILE,
+            path.display(),
+            err,
+        ))),
+    }
+}
+
 struct PendingAtomicWrite(PathBuf);
 
 impl Drop for PendingAtomicWrite {
     fn drop(&mut self) {
-        // After a successful rename the temporary path no longer exists.
+        // A rename consumes this path; a hard link leaves it for cleanup.
         // On any earlier failure, remove the partial credential file.
         let _ = fs::remove_file(&self.0);
     }
@@ -349,6 +551,20 @@ fn write_atomic_with_permissions(
     contents: &[u8],
     permissions: Option<fs::Permissions>,
 ) -> Result<(), String> {
+    let (pending, file) = prepare_atomic_write(path, contents, permissions)?;
+    drop(file);
+    // Never delete the destination after a failed replacement: it may be the
+    // only valid auth cache.
+    maybe_fail(FAIL_WRITE_RENAME)
+        .and_then(|_| fs::rename(&pending.0, path))
+        .map_err(|err| crate::msg2(COMMON_ERR_REPLACE_FILE, path.display(), err))
+}
+
+fn prepare_atomic_write(
+    path: &Path,
+    contents: &[u8],
+    permissions: Option<fs::Permissions>,
+) -> Result<(PendingAtomicWrite, fs::File), String> {
     let parent = path
         .parent()
         .ok_or_else(|| crate::msg1(COMMON_ERR_RESOLVE_PARENT, path.display()))?;
@@ -385,8 +601,9 @@ fn write_atomic_with_permissions(
             }
         };
         // This declaration order closes the handle before cleanup on errors.
-        // The success path explicitly closes it before renaming below.
-        let _pending = PendingAtomicWrite(tmp_path.clone());
+        // Replacement closes it before renaming; creation retains an ownership
+        // receipt through publication and any subsequent rollback.
+        let pending = PendingAtomicWrite(tmp_path.clone());
         let mut tmp_file = file;
         maybe_fail(FAIL_WRITE_OPEN)
             .map_err(|err| crate::msg2(COMMON_ERR_CREATE_TEMP, path.display(), err))?;
@@ -404,18 +621,18 @@ fn write_atomic_with_permissions(
         maybe_fail(FAIL_WRITE_SYNC)
             .and_then(|_| tmp_file.sync_all())
             .map_err(|err| crate::msg2(COMMON_ERR_WRITE_TEMP, path.display(), err))?;
-        drop(tmp_file);
 
-        let rename_result = maybe_fail(FAIL_WRITE_RENAME).and_then(|_| fs::rename(&tmp_path, path));
-        match rename_result {
-            Ok(()) => return Ok(()),
-            Err(err) => {
-                // std::fs::rename replaces an existing file on supported
-                // platforms. Never delete the destination after a failed
-                // replacement: it may be the only valid auth cache.
-                return Err(crate::msg2(COMMON_ERR_REPLACE_FILE, path.display(), err));
+        #[cfg(test)]
+        {
+            let remaining = BEFORE_ATOMIC_COMMIT_REMAINING.with(Cell::get);
+            if remaining > 0 {
+                BEFORE_ATOMIC_COMMIT_REMAINING.with(|slot| slot.set(remaining - 1));
+            } else if let Some(hook) = BEFORE_ATOMIC_COMMIT.with(Cell::take) {
+                hook(&tmp_path, path);
             }
         }
+
+        return Ok((pending, tmp_file));
     }
 }
 
