@@ -20,7 +20,8 @@ Status at [`b43e063`](https://github.com/midhunmonachan/codex-profiles/commit/b4
 
 ## Pending transfer safety changes
 
-The import/export safety patch creates new files without replacing an occupied
+[PR #49](https://github.com/midhunmonachan/codex-profiles/pull/49) contains the
+import/export safety patch. It creates new files without replacing an occupied
 path, including a destination created after validation. Failed imports verify
 held file identity and contents before removing created profiles, preserve
 detected changes, and report incomplete rollback.

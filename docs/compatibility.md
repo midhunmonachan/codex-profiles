@@ -219,10 +219,12 @@ does **not** eliminate that check/unlink race or make import transactional again
 external writers. [POSIX unlink](https://pubs.opengroup.org/onlinepubs/9699919799/functions/unlink.html)
 removes a named directory entry; it does not accept an expected file identity.
 
-Runtime evidence currently covers Linux local filesystems with synthetic records.
-Windows/NTFS/ReFS, macOS, unusual/network filesystem identity behavior, process
-crashes, and power-loss recovery are unverified. Holding one handle per new
-profile also consumes file descriptors until import completes. Stronger atomic
+Cross-platform results are tracked in [PR #49](https://github.com/midhunmonachan/codex-profiles/pull/49).
+The required CI matrix exercises Linux x64, macOS 15 ARM64, and Windows Server
+2025 x64 on hosted local filesystems with synthetic records. It does not cover
+Windows reparse points, ReFS or network filesystems, process crashes, or
+power-loss recovery. Holding one handle per new profile also consumes file
+descriptors until import completes. Stronger atomic
 rollback and persistent recovery require a separate design; do not advertise
 unconditional ownership-safe deletion or all-or-nothing imports on this evidence.
 
