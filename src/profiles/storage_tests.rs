@@ -147,6 +147,196 @@ fn import_rolls_back_profiles_when_a_later_atomic_write_fails() {
 }
 
 #[test]
+fn import_preserves_a_destination_created_after_validation() {
+    use crate::common::AtomicCommitHookGuard;
+
+    let (_dir, paths) = setup();
+    write_profiles_index(&paths, &ProfilesIndex::default()).unwrap();
+    let index_before = fs::read(&paths.profiles_index).unwrap();
+    let input = bundle(
+        &paths,
+        serde_json::json!([
+            {"id":"first","label":"First","contents":auth("first")},
+            {"id":"second","label":"Second","contents":auth("second")}
+        ]),
+    );
+    let _hook = AtomicCommitHookGuard::on_nth_commit(
+        |_, destination| {
+            assert_eq!(destination.file_name().unwrap(), "second.json");
+            assert!(!destination.exists());
+            fs::write(destination, b"synthetic competing profile").unwrap();
+        },
+        2,
+    );
+
+    let result = import_profiles(&paths, input, false);
+    assert_eq!(
+        fs::read(paths.profiles.join("second.json")).unwrap(),
+        b"synthetic competing profile"
+    );
+    assert_eq!(
+        result.unwrap_err(),
+        "Error: Profile 'second' already exists."
+    );
+    assert!(!paths.profiles.join("first.json").exists());
+    assert_eq!(fs::read(&paths.profiles_index).unwrap(), index_before);
+}
+
+#[test]
+fn import_rollback_preserves_another_writers_identical_replacement() {
+    use crate::common::{AtomicCommitHookGuard, FAIL_WRITE_RENAME, FailpointGuard};
+
+    for failed_write in [2, 3] {
+        let (_dir, paths) = setup();
+        write_profiles_index(&paths, &ProfilesIndex::default()).unwrap();
+        let index_before = fs::read(&paths.profiles_index).unwrap();
+        let input = bundle(
+            &paths,
+            serde_json::json!([
+                {"id":"first","contents":auth("first")},
+                {"id":"second","contents":auth("second")}
+            ]),
+        );
+        let _hook = AtomicCommitHookGuard::on_nth_commit(
+            |_, destination| {
+                let first = destination.with_file_name("first.json");
+                let replacement = destination.with_file_name("replacement");
+                fs::write(&replacement, fs::read(&first).unwrap()).unwrap();
+                fs::rename(replacement, &first).unwrap();
+            },
+            failed_write,
+        );
+        let _failure = FailpointGuard::new(FAIL_WRITE_RENAME, failed_write);
+
+        let result = import_profiles(&paths, input, false);
+        assert!(
+            paths.profiles.join("first.json").is_file(),
+            "rollback removed another writer's replacement"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .contains("Import rollback incomplete: 1")
+        );
+        assert!(!paths.profiles.join("second.json").exists());
+        assert_eq!(fs::read(&paths.profiles_index).unwrap(), index_before);
+    }
+}
+
+#[test]
+fn import_rollback_preserves_an_in_place_edit() {
+    use crate::common::{AtomicCommitHookGuard, FAIL_WRITE_RENAME, FailpointGuard};
+
+    let (_dir, paths) = setup();
+    write_profiles_index(&paths, &ProfilesIndex::default()).unwrap();
+    let index_before = fs::read(&paths.profiles_index).unwrap();
+    let input = bundle(
+        &paths,
+        serde_json::json!([
+            {"id":"first","contents":auth("first")},
+            {"id":"second","contents":auth("second")}
+        ]),
+    );
+    let _hook = AtomicCommitHookGuard::on_nth_commit(
+        |_, destination| {
+            let first = destination.with_file_name("first.json");
+            let original = fs::read(&first).unwrap();
+            // Same inode and length: identity and metadata alone do not detect this.
+            fs::write(first, vec![b'x'; original.len()]).unwrap();
+        },
+        2,
+    );
+    let _failure = FailpointGuard::new(FAIL_WRITE_RENAME, 2);
+
+    let error = import_profiles(&paths, input, false).unwrap_err();
+    assert!(error.contains("Import rollback incomplete: 1"));
+    assert!(
+        fs::read(paths.profiles.join("first.json"))
+            .unwrap()
+            .iter()
+            .all(|byte| *byte == b'x')
+    );
+    assert!(!paths.profiles.join("second.json").exists());
+    assert_eq!(fs::read(&paths.profiles_index).unwrap(), index_before);
+}
+
+#[cfg(unix)]
+#[test]
+fn import_rollback_preserves_a_symlink_replacement_and_its_target() {
+    use crate::common::{AtomicCommitHookGuard, FAIL_WRITE_RENAME, FailpointGuard};
+    use std::os::unix::fs::symlink;
+
+    let (_dir, paths) = setup();
+    write_profiles_index(&paths, &ProfilesIndex::default()).unwrap();
+    let index_before = fs::read(&paths.profiles_index).unwrap();
+    let input = bundle(
+        &paths,
+        serde_json::json!([
+            {"id":"first","contents":auth("first")},
+            {"id":"second","contents":auth("second")}
+        ]),
+    );
+    let _hook = AtomicCommitHookGuard::on_nth_commit(
+        |_, destination| {
+            let first = destination.with_file_name("first.json");
+            let target = destination.with_file_name("other-writer");
+            fs::rename(&first, &target).unwrap();
+            symlink("other-writer", first).unwrap();
+        },
+        2,
+    );
+    let _failure = FailpointGuard::new(FAIL_WRITE_RENAME, 2);
+
+    let error = import_profiles(&paths, input, false).unwrap_err();
+    assert!(error.contains("Import rollback incomplete: 1"));
+    assert_eq!(
+        fs::read_link(paths.profiles.join("first.json")).unwrap(),
+        Path::new("other-writer")
+    );
+    assert!(paths.profiles.join("other-writer").is_file());
+    assert!(!paths.profiles.join("second.json").exists());
+    assert_eq!(fs::read(&paths.profiles_index).unwrap(), index_before);
+}
+
+#[test]
+fn import_identity_failures_preserve_unknown_files_and_the_index() {
+    use crate::common::{FAIL_FILE_IDENTITY, FailpointGuard};
+
+    for failed_identity in [1, 2] {
+        let (_dir, paths) = setup();
+        write_profiles_index(&paths, &ProfilesIndex::default()).unwrap();
+        let index_before = fs::read(&paths.profiles_index).unwrap();
+        let input = bundle(
+            &paths,
+            serde_json::json!([
+                {"id":"first","contents":auth("first")},
+                {"id":"second","contents":auth("second")}
+            ]),
+        );
+        let _failure = FailpointGuard::new(FAIL_FILE_IDENTITY, failed_identity);
+
+        let error = import_profiles(&paths, input, false).unwrap_err();
+        assert_eq!(
+            paths.profiles.join("first.json").exists(),
+            failed_identity == 2
+        );
+        assert_eq!(
+            error.contains("Import rollback incomplete"),
+            failed_identity == 2
+        );
+        assert!(!paths.profiles.join("second.json").exists());
+        assert_eq!(fs::read(&paths.profiles_index).unwrap(), index_before);
+        assert!(!fs::read_dir(&paths.profiles).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".tmp-")
+        }));
+    }
+}
+
+#[test]
 fn import_and_export_preserve_labels_and_api_keys() {
     let (_dir, paths) = setup();
     let input = bundle(
@@ -179,6 +369,21 @@ fn import_and_export_preserve_labels_and_api_keys() {
         exported.profiles[1].contents["OPENAI_API_KEY"],
         "synthetic-key"
     );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&output).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    assert!(!fs::read_dir(&paths.codex).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".export.json.tmp-")
+    }));
     assert!(
         export_profiles(&paths, None, vec![], output, false)
             .unwrap_err()
@@ -202,6 +407,108 @@ fn import_and_export_preserve_labels_and_api_keys() {
         false,
     )
     .unwrap();
+}
+
+#[test]
+fn export_preserves_a_destination_created_after_the_initial_check() {
+    use crate::common::AtomicCommitHookGuard;
+
+    let (dir, paths) = setup();
+    write_profile(&paths, "saved", "synthetic-account");
+    let output = dir.path().join("exports/bundle.json");
+    let _hook = AtomicCommitHookGuard::new(|temporary, destination| {
+        assert!(!destination.exists());
+        let staged: ExportBundle = serde_json::from_slice(&fs::read(temporary).unwrap()).unwrap();
+        assert_eq!(staged.profiles.len(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(temporary).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        fs::write(destination, b"synthetic competing output").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(destination, fs::Permissions::from_mode(0o640)).unwrap();
+        }
+    });
+
+    let result = export_profiles(&paths, None, vec![], output.clone(), false);
+    assert_eq!(fs::read(&output).unwrap(), b"synthetic competing output");
+    assert_eq!(
+        result.unwrap_err(),
+        format!("Error: Export file already exists: {}", output.display())
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&output).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+    }
+    let remaining: Vec<_> = fs::read_dir(output.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(remaining, vec![output]);
+}
+
+#[cfg(unix)]
+#[test]
+fn export_preserves_a_dangling_destination_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let (dir, paths) = setup();
+    write_profile(&paths, "saved", "synthetic-account");
+    let exports = dir.path().join("exports");
+    fs::create_dir(&exports).unwrap();
+    let output = exports.join("bundle.json");
+    let target = dir.path().join("missing-target.json");
+    symlink(&target, &output).unwrap();
+    assert!(
+        !output.exists(),
+        "dangling link passes the initial existence check"
+    );
+
+    let error = export_profiles(&paths, None, vec![], output.clone(), false).unwrap_err();
+    assert_eq!(
+        error,
+        format!("Error: Export file already exists: {}", output.display())
+    );
+    assert_eq!(fs::read_link(&output).unwrap(), target);
+    assert!(!target.exists());
+    assert_eq!(fs::read_dir(exports).unwrap().count(), 1);
+}
+
+#[test]
+fn export_write_failures_remove_temporary_files_without_creating_the_destination() {
+    use crate::common::{
+        FAIL_WRITE_OPEN, FAIL_WRITE_PERMS, FAIL_WRITE_RENAME, FAIL_WRITE_SYNC, FAIL_WRITE_WRITE,
+        FailpointGuard,
+    };
+
+    for step in [
+        FAIL_WRITE_OPEN,
+        FAIL_WRITE_WRITE,
+        FAIL_WRITE_PERMS,
+        FAIL_WRITE_SYNC,
+        FAIL_WRITE_RENAME,
+    ] {
+        if step == FAIL_WRITE_PERMS && !cfg!(unix) {
+            continue;
+        }
+        let (dir, paths) = setup();
+        write_profile(&paths, "saved", "synthetic-account");
+        let output = dir.path().join("exports/bundle.json");
+        let _failure = FailpointGuard::new(step, 1);
+        assert!(export_profiles(&paths, None, vec![], output.clone(), false).is_err());
+        assert!(!output.exists());
+        assert_eq!(fs::read_dir(output.parent().unwrap()).unwrap().count(), 0);
+    }
 }
 
 #[test]

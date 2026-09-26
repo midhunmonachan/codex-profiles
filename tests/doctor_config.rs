@@ -250,7 +250,10 @@ fn doctor_inspects_existing_profile_storage_and_active_profile() {
 
     assert!(detail("codex_config").contains("auth storage=file (compatible)"));
     assert!(detail("auth file").starts_with("valid"));
-    assert!(detail("profiles directory").contains(".codex/profiles"));
+    assert_eq!(
+        detail("profiles directory"),
+        env.codex().join("profiles").display().to_string()
+    );
     assert!(detail("profiles index").contains("1 entries"));
     assert_eq!(detail("profiles lock"), "acquired");
     assert_eq!(detail("saved profiles"), "1 valid, 0 invalid");

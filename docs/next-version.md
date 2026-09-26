@@ -18,6 +18,25 @@ Status at [`b43e063`](https://github.com/midhunmonachan/codex-profiles/commit/b4
   still open. [Encrypted exports (#20)](https://github.com/midhunmonachan/codex-profiles/issues/20)
   remain separate design work. Neither feature is implemented.
 
+## Pending transfer safety changes
+
+[PR #49](https://github.com/midhunmonachan/codex-profiles/pull/49) contains the
+import/export safety patch. It creates new files without replacing an occupied
+path, including a destination created after validation. Failed imports verify
+held file identity and contents before removing created profiles, preserve
+detected changes, and report incomplete rollback.
+
+CLI syntax and version-1 bundles remain unchanged. Transfers require hard-link
+support; import additionally requires readable file identities. Rollback checks
+and unlink are separate operations, so noncooperating writers can still race
+cleanup. See [the compatibility limits](compatibility.md#import-creation-and-rollback-limits).
+
+Local Linux verification with Rust 1.94.0 passed all 465 tests, formatting,
+Clippy, and security audit. The required PR checks provide macOS/Windows
+execution evidence for their hosted environments. This work does not establish
+ReFS/network-filesystem, power-loss, or atomic rollback guarantees and is not
+included in a published release.
+
 ## Next decision
 
 Research and select the next feature before starting implementation. Recheck

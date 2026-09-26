@@ -171,6 +171,63 @@ labels may differ from Codex's labels. This review covers the monitored paths
 and their local consumers, not live OAuth switching, the full upstream dependency
 graph, or current service behavior.
 
+## Export file safety review
+
+Reviewed September 26, 2026 for the local export no-clobber fix: current
+[OpenAI authentication guidance](https://learn.chatgpt.com/docs/auth) and
+[`openai/codex` storage at `e72da2b53805894878023d01949a25a082e0a5cb`](https://github.com/openai/codex/blob/e72da2b53805894878023d01949a25a082e0a5cb/codex-rs/login/src/auth/storage.rs).
+The review covered the file-backed auth shape, location, and Unix private-file
+creation. Export still serializes the saved JSON in the existing version 1
+bundle; no authentication, refresh, or credential-store policy changes.
+This narrow review does not advance the six-path monitoring baseline above.
+
+Export stages and syncs a complete private file in the output directory, then
+uses [`std::fs::hard_link`](https://doc.rust-lang.org/std/fs/fn.hard_link.html)
+to create the destination without replacing an existing entry. The temporary
+name is removed on normal success or failure. Filesystems without hard-link
+support fail closed. This does not guarantee power-loss durability or cleanup
+after abrupt process termination. Unix mode remains `0600`; Windows retains
+the existing inherited filesystem-permission behavior.
+
+## Import creation and rollback limits
+
+The local September 26, 2026 import fix uses the same atomic no-clobber creation
+for each saved profile. All bundle validation still precedes writes. A failed
+creation or index save leaves the pre-import index intact; rollback removes
+unchanged files created by that import and reports incomplete cleanup when a
+file has changed or cannot be verified/removed. Detected replacements, including
+identical-byte replacements and symlinks, are preserved. An unchanged existing
+index need not list an unrelated file left by another writer.
+
+Import captures identity from its open staged file **before** creating the
+destination, then retains that handle through index commit or rollback. It never
+acquires ownership by opening the destination after publication. Unix uses the
+open file's device/inode. Windows uses the volume serial and complete 128-bit
+file ID from
+[`GetFileInformationByHandleEx(FileIdInfo)`](https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_info).
+The Windows FFI call borrows a live handle and supplies an initialized,
+correctly sized `FILE_ID_INFO` buffer; failures propagate before publication.
+Unsupported identity queries have no weaker comparison fallback. Export does
+not require this additional identity query. The existing private-file modes,
+version 1 format, and authentication boundary from the review above are preserved.
+
+Rollback checks the current entry type, held identity, and exact bounded contents,
+then rechecks entry type and identity before unlinking. These operations are
+separate: the store lock serializes cooperating Codex Profiles commands, but a
+noncooperating writer can replace or edit a path after the last check. This fix
+does **not** eliminate that check/unlink race or make import transactional against
+external writers. [POSIX unlink](https://pubs.opengroup.org/onlinepubs/9699919799/functions/unlink.html)
+removes a named directory entry; it does not accept an expected file identity.
+
+Cross-platform results are tracked in [PR #49](https://github.com/midhunmonachan/codex-profiles/pull/49).
+The required CI matrix exercises Linux x64, macOS 15 ARM64, and Windows Server
+2025 x64 on hosted local filesystems with synthetic records. It does not cover
+Windows reparse points, ReFS or network filesystems, process crashes, or
+power-loss recovery. Holding one handle per new profile also consumes file
+descriptors until import completes. Stronger atomic
+rollback and persistent recovery require a separate design; do not advertise
+unconditional ownership-safe deletion or all-or-nothing imports on this evidence.
+
 ## Upstream monitoring
 
 The `codex-compatibility` workflow compares those six source paths against the

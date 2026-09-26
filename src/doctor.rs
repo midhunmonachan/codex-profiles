@@ -868,6 +868,7 @@ mod tests {
         assert!(create_profiles_lock(&bad_parent.join("profiles.lock")).is_err());
         #[cfg(unix)]
         assert!(set_path_mode(Path::new("\0"), 0o600).is_err());
+        #[cfg(unix)]
         assert!(set_mode_if_needed(Path::new("\0"), 0o600).is_err());
     }
 
@@ -1001,7 +1002,10 @@ mod tests {
         );
 
         let repairs = repair(&paths).unwrap();
+        #[cfg(unix)]
         assert!(!repairs.is_empty(), "expected permission repairs");
+        #[cfg(not(unix))]
+        assert!(repairs.is_empty(), "permission repairs require Unix");
         assert!(repair(&paths).unwrap().is_empty());
 
         doctor(&paths, false, false).unwrap();

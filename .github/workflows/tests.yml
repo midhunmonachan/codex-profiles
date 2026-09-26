@@ -69,6 +69,7 @@ jobs:
           tool: cargo-nextest@0.9.129
 
       - name: Run checks
+        shell: bash
         run: scripts/check.sh --no-audit
       - name: Smoke test executable and npm package
         shell: bash

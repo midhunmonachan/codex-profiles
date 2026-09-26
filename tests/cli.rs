@@ -3108,6 +3108,56 @@ fn json_export_returns_success_shape() {
 }
 
 #[test]
+fn export_existing_destination_keeps_error_streams_and_contents() {
+    let env = TestEnv::new();
+    seed_alpha(&env);
+    env.run(&["save", "--label", "alpha"]);
+    let destination = env.home_path().join("bundle.json");
+    fs::write(&destination, b"synthetic existing output").unwrap();
+
+    for mode in ["--plain", "--json"] {
+        let output = env.run_output(&["export", "--output", destination.to_str().unwrap(), mode]);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains(&format!(
+            "Export file already exists: {}",
+            destination.display()
+        )));
+        assert_eq!(
+            fs::read(&destination).unwrap(),
+            b"synthetic existing output"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn export_dangling_symlink_keeps_error_streams_and_link() {
+    use std::os::unix::fs::symlink;
+
+    let env = TestEnv::new();
+    seed_alpha(&env);
+    env.run(&["save", "--label", "alpha"]);
+    let destination = env.home_path().join("bundle.json");
+    let target = env.home_path().join("missing.json");
+    symlink(&target, &destination).unwrap();
+
+    for mode in ["--plain", "--json"] {
+        let output = env.run_output(&["export", "--output", destination.to_str().unwrap(), mode]);
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains(&format!(
+            "Export file already exists: {}",
+            destination.display()
+        )));
+        assert_eq!(fs::read_link(&destination).unwrap(), target);
+        assert!(!target.exists());
+    }
+}
+
+#[test]
 fn json_import_returns_success_shape() {
     // Export from one env, import into a fresh one.
     let export_env = TestEnv::new();
