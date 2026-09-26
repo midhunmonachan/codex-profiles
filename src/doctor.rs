@@ -1002,7 +1002,10 @@ mod tests {
         );
 
         let repairs = repair(&paths).unwrap();
+        #[cfg(unix)]
         assert!(!repairs.is_empty(), "expected permission repairs");
+        #[cfg(not(unix))]
+        assert!(repairs.is_empty(), "permission repairs require Unix");
         assert!(repair(&paths).unwrap().is_empty());
 
         doctor(&paths, false, false).unwrap();
